@@ -98,7 +98,7 @@ var PLAYBACK_SPEED = 1;
 
 var CUT_CHECK_INTERVAL = 1000;
 var CUT_MIN_VISITED_DELTA = 200;
-var FORK_COOLDOWN = 4;      // branch must move this many cells between forks
+var FORK_COOLDOWN = 4;
 
 var START = [0, 0];
 var GOAL = [W-1, H-1];
@@ -373,37 +373,38 @@ AStar.prototype._recon = function(end){
   p.reverse(); this.path = p;
 };
 
-// =============== LSB ===============
-function Branch(cell, path, cameFrom){
+// =============== LSB — persistent parent-chain branches ===============
+// Branch fields:
+//   cell, k       — current position
+//   parent        — Branch this one descended from (null at start)
+//   cameFrom      — cell we stepped from (matches parent.cell normally)
+//   depth         — number of steps from start
+//   stack         — array of junction frames; CoW at fork time only for the
+//                   entry we mutate. Each frame: {k, cell, options, nextIdx}
+//   scoreCache, lastForkDepth, parked
+//
+// hasOnPath(branch, k): walk parent chain. Stops early because chains share
+// suffixes and worst case is depth, but in practice it terminates at the last
+// junction where k was chosen.
+
+function Branch(cell, parent, cameFrom){
   this.cell = cell;
   this.k = cell[1] * W + cell[0];
-  this.path = path.slice();
+  this.parent = parent;
   this.cameFrom = cameFrom;
-  this.pathSet = {};
-  for(var i=0; i<this.path.length; i++){
-    var c = this.path[i];
-    this.pathSet[c[1]*W + c[0]] = 1;
-  }
+  this.depth = parent ? parent.depth + 1 : 0;
   this.stack = [];
   this.parked = false;
   this.scoreCache = 0;
-  this.depth = this.path.length - 1;
-  this.lastForkDepth = -999;
+  this.lastForkDepth = parent ? parent.lastForkDepth : -999;
 }
-Branch.prototype.clone = function(){
-  var b = new Branch(this.cell, this.path, this.cameFrom);
-  b.scoreCache = this.scoreCache;
-  b.depth = this.depth;
-  b.lastForkDepth = this.lastForkDepth;
-  for(var i=0; i<this.stack.length; i++){
-    var s = this.stack[i];
-    b.stack.push({
-      cell: s.cell, k: s.k,
-      options: s.options.slice(),
-      nextIdx: s.nextIdx,
-      pathIdx: s.pathIdx
-    });
-  }
+Branch.prototype.cloneFor = function(newCell, topFrame){
+  var b = new Branch(newCell, this, this.cell);
+  // Share the parent's stack array reference up to but not including the
+  // frame we're pushing; then push our fresh top frame.
+  b.stack = this.stack.slice();
+  b.stack.push(topFrame);
+  b.lastForkDepth = this.depth + 1;
   return b;
 };
 
@@ -428,7 +429,6 @@ function LSB(g, start, goal){
   this.dtg = dtg;
   this.goalK = goal[1]*W + goal[0];
 
-  // Precompute open-neighbor count for every cell.
   var openCount = new Uint8Array(N);
   for(var yy=0; yy<H; yy++){
     var bb = yy * W;
@@ -459,7 +459,7 @@ function LSB(g, start, goal){
   this.visited[k0] = 1; this._visitedCount++;
   this.generated[k0] = 1;
 
-  var b = new Branch(start, [start], null);
+  var b = new Branch(start, null, null);
   b.scoreCache = dtg[b.k];
   this.branches = [b];
   this.parked = [];
@@ -472,6 +472,7 @@ function LSB(g, start, goal){
   this.lastCutCheckVisited = 0;
   this.cutsMade = 0;
   this.cutCellsPruned = 0;
+  this.cutKilledBranches = 0;
 
   this.layerMedian = 0;
   this.parkedFull = false;
@@ -498,11 +499,29 @@ LSB.prototype._unpark = function(n){
   }
 };
 
-// Uses precomputed layerMedian; skips if parked is full or too few active.
 LSB.prototype._shouldPark = function(b){
   if(this.branches.length <= this.minActive) return false;
   if(this.parkedFull) return false;
   return b.scoreCache > this.layerMedian * 1.5;
+};
+
+// Walk parent chain from b, checking whether k is on the branch's own path.
+LSB.prototype._onPath = function(b, k){
+  var cur = b;
+  while(cur){
+    if(cur.k === k) return true;
+    cur = cur.parent;
+  }
+  return false;
+};
+
+// Reconstruct a full path from start to the branch's current cell.
+LSB.prototype._reconPath = function(b){
+  var arr = [];
+  var cur = b;
+  while(cur){ arr.push(cur.cell); cur = cur.parent; }
+  arr.reverse();
+  return arr;
 };
 
 LSB.prototype._checkForCuts = function(){
@@ -610,6 +629,22 @@ LSB.prototype._checkForCuts = function(){
     }
   }
 
+  var survivingActive = [];
+  for(var bi2=0; bi2<this.branches.length; bi2++){
+    var br = this.branches[bi2];
+    if(reached[br.k] || inCut[br.k]) survivingActive.push(br);
+    else this.cutKilledBranches++;
+  }
+  this.branches = survivingActive;
+
+  var survivingParked = [];
+  for(var pi2=0; pi2<this.parked.length; pi2++){
+    var pb = this.parked[pi2];
+    if(reached[pb.k] || inCut[pb.k]) survivingParked.push(pb);
+    else this.cutKilledBranches++;
+  }
+  this.parked = survivingParked;
+
   if(pruned > 0){
     this.cutsMade++;
     this.cutCellsPruned += pruned;
@@ -632,7 +667,6 @@ LSB.prototype.step = function(budget){
     var oldBranches = this.branches;
     var ol = oldBranches.length;
 
-    // Per-layer median (was per-branch, now once)
     var scores = new Array(ol);
     for(var si=0; si<ol; si++) scores[si] = oldBranches[si].scoreCache;
     scores.sort(function(a,b){ return a - b; });
@@ -647,7 +681,6 @@ LSB.prototype.step = function(budget){
     }
     if(stop) break;
 
-    // Only sort if we're actually going to trim
     if(next.length > this.max_branches){
       next.sort(function(a,b){ return a.scoreCache - b.scoreCache; });
     }
@@ -663,13 +696,8 @@ LSB.prototype.step = function(budget){
       if(this.parked.length < this.max_parked){
         ob.parked = true; this.parked.push(ob); this.parks++;
       } else {
-        for(var pc=0; pc<ob.path.length; pc++){
-          var c = ob.path[pc];
-          var k = c[1]*W + c[0];
-          this.scar[k] += 0.5;
-          this.scarKeys[k] = 1;
-          this.dead[k] = 1;
-        }
+        // Just drop the reference — parent chain is shared with survivors,
+        // so there is no path array to scar.
         this.kills++;
       }
     }
@@ -703,22 +731,24 @@ LSB.prototype.step = function(budget){
 };
 
 LSB.prototype.stepBranch = function(b, next){
-  if(b.k === this.goalK){ this.done = true; this.path = b.path; return; }
+  if(b.k === this.goalK){ this.done = true; this.path = this._reconPath(b); return; }
   this.expanded[b.k] = 1;
 
   var x0 = b.cell[0], y0 = b.cell[1];
   var grid = this.grid;
   var openCount = this.openCount;
+  var dtg = this.dtg;
   var opts = [];
 
+  // 4 fixed neighbor checks, no allocation except the small opts array.
   for(var i=0; i<4; i++){
     var nx = x0 + N4[i][0];
     var ny = y0 + N4[i][1];
     if(nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
     if(grid[ny][nx] !== 0) continue;
     var kk = ny * W + nx;
-    if(b.pathSet[kk]) continue;
-    if(kk === this.goalK){ opts.push([nx, ny, kk]); continue; }
+    if(this._onPath(b, kk)) continue;
+    if(kk === this.goalK){ opts.push(nx, ny, kk); continue; }
     if(this.dead[kk]) continue;
     if(openCount[kk] <= 1){
       this.scar[kk] += 1.0;
@@ -727,91 +757,100 @@ LSB.prototype.stepBranch = function(b, next){
       this.earlyDeaths++;
       continue;
     }
-    opts.push([nx, ny, kk]);
+    opts.push(nx, ny, kk);
   }
 
-  if(opts.length === 0){
+  var nOpts = opts.length / 3;
+
+  if(nOpts === 0){
     if(this.backtrack(b, next)) return;
     next.push(b);
     return;
   }
 
-  var dtg = this.dtg;
-  opts.sort(function(p, q){ return dtg[p[2]] - dtg[q[2]]; });
-  var primary = opts[0];
+  // Sort a small opts list by dtg, preserving (x,y,k) triples together.
+  // For 4 or fewer options, this is faster than a comparator call in most engines.
+  // We'll pack into fixed slots and use insertion sort on indices.
+  var primaryIdx = 0;
+  var primaryD = dtg[opts[2]];
+  for(var oi=1; oi<nOpts; oi++){
+    var d = dtg[opts[oi*3 + 2]];
+    if(d < primaryD){ primaryD = d; primaryIdx = oi; }
+  }
 
-  // Fork only if cooldown elapsed
-  var canFork = (b.depth - b.lastForkDepth) >= FORK_COOLDOWN;
-
-  if(opts.length > 1 && canFork){
-    var bestD = dtg[primary[2]];
-    var tiedCount = 1;
-    for(var ti=1; ti<opts.length; ti++) if(Math.abs(dtg[opts[ti][2]] - bestD) < this.tryEps) tiedCount++;
-
-    if(tiedCount > 1){
-      var wrote = 1;
-      for(var k2=1; k2<opts.length && wrote<tiedCount; k2++){
-        if(Math.abs(dtg[opts[k2][2]] - bestD) >= this.tryEps) continue;
-        var nb = b.clone();
-        var nt = opts[k2];
-        nb.stack.push({
-          cell: b.cell, k: b.k,
-          options: opts.slice(),
-          nextIdx: tiedCount,
-          pathIdx: b.path.length - 1
-        });
-        nb.path.push(nt);
-        nb.pathSet[nt[2]] = 1;
-        nb.cameFrom = b.cell;
-        nb.cell = nt; nb.k = nt[2];
-        nb.depth = b.depth + 1;
-        nb.lastForkDepth = nb.depth;
-        nb.scoreCache = dtg[nt[2]] + 0.25 * nb.depth;
-        this._addGenerated(nt[2]);
-        next.push(nb);
-        wrote++;
-      }
-      b.stack.push({
-        cell: b.cell, k: b.k,
-        options: opts,
-        nextIdx: tiedCount,
-        pathIdx: b.path.length - 1
-      });
-      b.lastForkDepth = b.depth;
-    } else {
-      b.stack.push({
-        cell: b.cell, k: b.k,
-        options: opts,
-        nextIdx: 1,
-        pathIdx: b.path.length - 1
-      });
+  // Determine ties (within tryEps)
+  var tiedCount = 0;
+  var tiedSlots = [];  // indices into opts triples
+  for(var oj=0; oj<nOpts; oj++){
+    if(Math.abs(dtg[opts[oj*3 + 2]] - primaryD) < this.tryEps){
+      tiedSlots.push(oj);
+      tiedCount++;
     }
-  } else if(opts.length > 1){
+  }
+
+  // Move primary to slot 0 position in opts (swap triples)
+  if(primaryIdx !== 0){
+    var t0x = opts[0], t0y = opts[1], t0k = opts[2];
+    opts[0] = opts[primaryIdx*3]; opts[1] = opts[primaryIdx*3 + 1]; opts[2] = opts[primaryIdx*3 + 2];
+    opts[primaryIdx*3] = t0x; opts[primaryIdx*3 + 1] = t0y; opts[primaryIdx*3 + 2] = t0k;
+  }
+
+  var canFork = (b.depth - b.lastForkDepth) >= FORK_COOLDOWN;
+  var madeFork = false;
+
+  if(tiedCount > 1 && canFork){
+    for(var k2=1; k2<tiedSlots.length; k2++){
+      var slot = tiedSlots[k2];
+      if(slot === 0) continue;   // primary was swapped here
+      var nCellX = opts[slot*3], nCellY = opts[slot*3 + 1], nK = opts[slot*3 + 2];
+      var topFrame = {
+        cell: b.cell, k: b.k,
+        options: opts.slice(),
+        nextIdx: tiedSlots.length
+      };
+      var nb = b.cloneFor([nCellX, nCellY], topFrame);
+      nb.scoreCache = dtg[nK] + 0.25 * nb.depth;
+      this._addGenerated(nK);
+      next.push(nb);
+      madeFork = true;
+    }
+    // Parent records all tied options as taken so its own backtracking skips them
     b.stack.push({
       cell: b.cell, k: b.k,
-      options: opts,
-      nextIdx: 1,
-      pathIdx: b.path.length - 1
+      options: opts.slice(),
+      nextIdx: tiedSlots.length
+    });
+    b.lastForkDepth = b.depth;
+  } else if(nOpts > 1){
+    b.stack.push({
+      cell: b.cell, k: b.k,
+      options: opts.slice(),
+      nextIdx: 1
     });
   }
 
-  b.path.push(primary);
-  b.pathSet[primary[2]] = 1;
-  b.cameFrom = b.cell;
-  b.cell = primary; b.k = primary[2];
-  b.depth++;
-  b.scoreCache = dtg[primary[2]] + 0.25 * b.depth;
-  this._addGenerated(primary[2]);
+  // Move parent to the primary neighbor
+  var px = opts[0], py = opts[1], pk = opts[2];
+  // Note: parent chain isn't extended here because we mutate the branch in-place.
+  // We need a new child Branch whose parent is `b`.
+  var childBranch = new Branch([px, py], b, b.cell);
+  childBranch.stack = b.stack.slice();
+  childBranch.parked = false;
+  childBranch.scoreCache = dtg[pk] + 0.25 * childBranch.depth;
+  childBranch.lastForkDepth = b.lastForkDepth;
+  this._addGenerated(pk);
 
-  if(b.k === this.goalK){ this.done = true; this.path = b.path; return; }
+  if(childBranch.k === this.goalK){ this.done = true; this.path = this._reconPath(childBranch); return; }
 
-  if(this._shouldPark(b)){
+  if(this._shouldPark(childBranch)){
     if(this.parked.length < this.max_parked){
-      b.parked = true; this.parked.push(b); this.parks++;
+      childBranch.parked = true;
+      this.parked.push(childBranch);
+      this.parks++;
       return;
     }
   }
-  next.push(b);
+  next.push(childBranch);
 };
 
 LSB.prototype.backtrack = function(b, next){
@@ -819,34 +858,46 @@ LSB.prototype.backtrack = function(b, next){
   while(b.stack.length > 0){
     var top = b.stack[b.stack.length - 1];
     if(top.nextIdx < top.options.length){
-      var nt = top.options[top.nextIdx];
+      var slot = top.nextIdx;
       top.nextIdx++;
-      if(this.dead[nt[2]] && nt[2] !== this.goalK) continue;
-
-      for(var i = b.path.length - 1; i > top.pathIdx; i--){
-        var c = b.path[i];
-        b.pathSet[c[1]*W + c[0]] = 0;
+      var nx = top.options[slot*3];
+      var ny = top.options[slot*3 + 1];
+      var nk = top.options[slot*3 + 2];
+      if(this.dead[nk] && nk !== this.goalK) continue;
+      // Pop frames above this one (shared, so we only truncate the local slice)
+      b.stack.length = b.stack.length; // no-op; kept for clarity
+      // Reposition branch to the junction cell, then step to option
+      // The new branch inherits the junction's parent chain.
+      // We navigate the parent chain back to the junction cell.
+      var junctionK = top.k;
+      var anchor = b;
+      while(anchor && anchor.k !== junctionK) anchor = anchor.parent;
+      if(!anchor){
+        // Shouldn't happen; the junction was on this branch's path.
+        b.stack.pop();
+        continue;
       }
-      b.path.length = top.pathIdx + 1;
-      b.path.push(nt);
-      b.pathSet[nt[2]] = 1;
-      b.cameFrom = top.cell;
-      b.cell = nt; b.k = nt[2];
-      b.depth = b.path.length - 1;
-      b.scoreCache = this.dtg[nt[2]] + 0.25 * b.depth;
-      this._addGenerated(nt[2]);
-      if(b.k === this.goalK){ this.done = true; this.path = b.path; return false; }
+      var childBranch = new Branch([nx, ny], anchor, anchor.cell);
+      childBranch.stack = b.stack.slice(0, b.stack.length - 1);
+      childBranch.scoreCache = this.dtg[nk] + 0.25 * childBranch.depth;
+      childBranch.lastForkDepth = anchor.lastForkDepth;
+      this._addGenerated(nk);
+      if(childBranch.k === this.goalK){ this.done = true; this.path = this._reconPath(childBranch); return false; }
+      // Swap b for the new child (we can only return one branch per slot)
+      b.cell = childBranch.cell;
+      b.k = childBranch.k;
+      b.parent = childBranch.parent;
+      b.cameFrom = childBranch.cameFrom;
+      b.depth = childBranch.depth;
+      b.stack = childBranch.stack;
+      b.parked = false;
+      b.scoreCache = childBranch.scoreCache;
+      b.lastForkDepth = childBranch.lastForkDepth;
       return false;
     }
     b.stack.pop();
   }
-  for(var j=0; j<b.path.length; j++){
-    var c2 = b.path[j];
-    var k2 = c2[1]*W + c2[0];
-    this.scar[k2] += 0.5;
-    this.scarKeys[k2] = 1;
-    this.dead[k2] = 1;
-  }
+  // Branch fully exhausted — kill.
   this.kills++;
   return true;
 };
@@ -874,6 +925,7 @@ function getStats(algo, isLSB){
     earlyDeaths: isLSB ? algo.earlyDeaths : null,
     cutsMade: isLSB ? algo.cutsMade : null,
     cutCellsPruned: isLSB ? algo.cutCellsPruned : null,
+    cutKilledBranches: isLSB ? algo.cutKilledBranches : null,
     parkedCount: isLSB ? algo.parked.length : null,
     algMs: algo.algMs,
     isLSB: isLSB
@@ -1030,6 +1082,7 @@ function fmtStats(stats){
     s += 'kills: <b>' + stats.kills + '</b>  parked: <b>' + stats.parkedCount + '</b><br>';
     s += 'early dead: <b>' + stats.earlyDeaths + '</b><br>';
     s += 'cuts: <b>' + stats.cutsMade + '</b>  pruned: <b>' + stats.cutCellsPruned + '</b><br>';
+    s += 'cut-killed branches: <b>' + stats.cutKilledBranches + '</b><br>';
   }
   s += 'done: <b>' + stats.done + '</b>';
   if(stats.exhausted) s += ' <span style="color:#f88">(exhausted)</span>';
@@ -1161,7 +1214,7 @@ function runOneOnce(factory, isLSB){
   var iters = 0;
   while(!algo.done && iters < 60000){ algo.step(MASS_BUDGET); iters++; }
   var s = getStats(algo, isLSB);
-  return { stats: s, algMs: algo.algMs, backtracks: s.backtracks, parks: s.parks, resumes: s.resumes, kills: s.kills, earlyDeaths: s.earlyDeaths, cutsMade: s.cutsMade, cutCellsPruned: s.cutCellsPruned };
+  return { stats: s, algMs: algo.algMs, backtracks: s.backtracks, parks: s.parks, resumes: s.resumes, kills: s.kills, earlyDeaths: s.earlyDeaths, cutsMade: s.cutsMade, cutCellsPruned: s.cutCellsPruned, cutKilledBranches: s.cutKilledBranches };
 }
 function runBench(factory, isLSB){
   var totalMs = 0, reps = 0, last = null;
@@ -1174,6 +1227,7 @@ function runBench(factory, isLSB){
     stats: last.stats, backtracks: last.backtracks, parks: last.parks,
     resumes: last.resumes, kills: last.kills, earlyDeaths: last.earlyDeaths,
     cutsMade: last.cutsMade, cutCellsPruned: last.cutCellsPruned,
+    cutKilledBranches: last.cutKilledBranches,
     avgMs: totalMs / reps, reps: reps
   };
 }
@@ -1197,7 +1251,7 @@ function massTest(reuse){
     }
     var rows = [];
     var aSuccess = 0, lSuccess = 0, aWins = 0, lWins = 0, ties = 0;
-    var acc = { aTime:0, lTime:0, aExp:0, lExp:0, aPath:0, lPath:0, lBT:0, lParks:0, lRes:0, lKills:0, lED:0, lCuts:0, lPruned:0, n:0 };
+    var acc = { aTime:0, lTime:0, aExp:0, lExp:0, aPath:0, lPath:0, lBT:0, lParks:0, lRes:0, lKills:0, lED:0, lCuts:0, lPruned:0, lCutKill:0, n:0 };
     for(var pi=0; pi<plans.length; pi++){
       var plan = plans[pi];
       var g = plan.fn(plan.seed);
@@ -1223,6 +1277,7 @@ function massTest(reuse){
         acc.lED += rl.earlyDeaths || 0;
         acc.lCuts += rl.cutsMade || 0;
         acc.lPruned += rl.cutCellsPruned || 0;
+        acc.lCutKill += rl.cutKilledBranches || 0;
         acc.n++;
       }
       rows.push({
@@ -1234,6 +1289,7 @@ function massTest(reuse){
         aSuccess: aOk, lSuccess: lOk, lReason: rl.stats.pathReason,
         lBT: rl.backtracks, lParks: rl.parks, lRes: rl.resumes, lKills: rl.kills,
         lED: rl.earlyDeaths, lCuts: rl.cutsMade, lPruned: rl.cutCellsPruned,
+        lCutKill: rl.cutKilledBranches,
         verdict: verdict
       });
     }
@@ -1244,8 +1300,8 @@ function massTest(reuse){
     txt += 'Verdict by expanded-cells. Success requires validated path.\n\n';
     txt += pad('type', 9) + padL('seed', 12) + padL('A*t', 10) + padL('LSBt', 10)
          + padL('A*exp', 8) + padL('LSBexp', 9) + padL('A*pth', 7) + padL('LSBpth', 8)
-         + padL('ok', 4) + padL('rep', 7) + padL('LSBbt', 8) + padL('park', 6) + padL('res', 5) + padL('kill', 6) + padL('eDead', 7) + padL('cuts', 6) + padL('prune', 7) + '  verdict\n';
-    txt += '---------------------------------------------------------------------------------------------------------------\n';
+         + padL('ok', 4) + padL('rep', 7) + padL('LSBbt', 8) + padL('park', 6) + padL('res', 5) + padL('kill', 6) + padL('eDead', 7) + padL('cuts', 6) + padL('prune', 7) + padL('cKill', 7) + '  verdict\n';
+    txt += '-----------------------------------------------------------------------------------------------------------------------\n';
     for(var ri=0; ri<rows.length; ri++){
       var r = rows[ri];
       txt += pad(r.type, 9) + padL(r.seed.toString(16), 12)
@@ -1259,10 +1315,11 @@ function massTest(reuse){
           + padL(r.lED === null ? '-' : r.lED, 7)
           + padL(r.lCuts === null ? '-' : r.lCuts, 6)
           + padL(r.lPruned === null ? '-' : r.lPruned, 7)
+          + padL(r.lCutKill === null ? '-' : r.lCutKill, 7)
           + '  ' + r.verdict + '\n';
       if(!r.lSuccess && r.lReason && r.lReason !== 'no path') txt += '  LSB path invalid: ' + r.lReason + '\n';
     }
-    txt += '---------------------------------------------------------------------------------------------------------------\n';
+    txt += '-----------------------------------------------------------------------------------------------------------------------\n';
     if(acc.n > 0){
       txt += pad('AVG', 9) + padL('', 12)
           + padL(fmtTime(acc.aTime/acc.n), 10) + padL(fmtTime(acc.lTime/acc.n), 10)
@@ -1274,6 +1331,7 @@ function massTest(reuse){
           + padL(Math.round(acc.lED/acc.n), 7)
           + padL(Math.round(acc.lCuts/acc.n), 6)
           + padL(Math.round(acc.lPruned/acc.n), 7)
+          + padL(Math.round(acc.lCutKill/acc.n), 7)
           + '  (n=' + acc.n + ')\n';
     }
     txt += '\nSUCCESS  A*: ' + aSuccess + '/' + MASS_N + '   LSB: ' + lSuccess + '/' + MASS_N + '\n';
@@ -1285,11 +1343,12 @@ function massTest(reuse){
       for(var si=0; si<rows.length; si++)
         if(rows[si].type === t2.name && rows[si].aSuccess && rows[si].lSuccess) sub.push(rows[si]);
       if(sub.length === 0){ txt += '  ' + pad(t2.name, 9) + '  (none)\n'; continue; }
-      var aAvgSum = 0, lAvgSum = 0, lBTSum = 0, lEDSum = 0, lCutsSum = 0, lPrunedSum = 0;
+      var aAvgSum = 0, lAvgSum = 0, lBTSum = 0, lEDSum = 0, lCutsSum = 0, lPrunedSum = 0, lCutKillSum = 0;
       for(var xi=0; xi<sub.length; xi++){
         aAvgSum += sub[xi].aExp; lAvgSum += sub[xi].lExp;
         lBTSum += sub[xi].lBT || 0; lEDSum += sub[xi].lED || 0;
         lCutsSum += sub[xi].lCuts || 0; lPrunedSum += sub[xi].lPruned || 0;
+        lCutKillSum += sub[xi].lCutKill || 0;
       }
       txt += '  ' + pad(t2.name, 9) + '  A* exp ' + padL(Math.round(aAvgSum/sub.length), 7)
            + '   LSB exp ' + padL(Math.round(lAvgSum/sub.length), 7)
@@ -1297,6 +1356,7 @@ function massTest(reuse){
            + '   eDead ' + padL(Math.round(lEDSum/sub.length), 6)
            + '   cuts ' + padL(Math.round(lCutsSum/sub.length), 5)
            + '   pruned ' + padL(Math.round(lPrunedSum/sub.length), 6)
+           + '   cKill ' + padL(Math.round(lCutKillSum/sub.length), 6)
            + '   n=' + sub.length + '\n';
     }
     out.textContent = txt;
