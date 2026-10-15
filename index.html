@@ -21,8 +21,6 @@
   pre#results { background:#0a0a0a; padding:10px; border-radius:6px; font-size:11px;
                 line-height:1.4; overflow-x:auto; color:#ddd; margin-top:10px;
                 border:1px solid #333; white-space:pre; }
-  .win  { color:#6f6; }
-  .lose { color:#f88; }
 </style>
 </head>
 <body>
@@ -58,7 +56,8 @@
   <span class="sw" style="background:#0a0"></span>start
   <span class="sw" style="background:#c0c"></span>goal
   <span class="sw" style="background:#555"></span>wall
-  <span class="sw" style="background:#ff0"></span>branch head
+  <span class="sw" style="background:#ff0"></span>active branch head
+  <span class="sw" style="background:#f80"></span>parked frontier
   <span class="sw" style="background:#2a4a7a"></span>visited
   <span class="sw" style="background:#0ff"></span>final path
   <span class="sw" style="background:#a00"></span>dead (scarred)
@@ -79,9 +78,7 @@ let BUDGET_PER_TICK = 8;
 function rng(seed){ let s=seed>>>0; return ()=>{ s=(s*1664525+1013904223)>>>0; return s/4294967296; }; }
 
 // ---------- maze gen ----------
-function makeOpen(){
-  return Array.from({length:H},()=>Array(W).fill(0));
-}
+function makeOpen(){ return Array.from({length:H},()=>Array(W).fill(0)); }
 function makeSparse(){
   const g = Array.from({length:H},()=>Array(W).fill(0));
   const blocks = [[10,5,16,24],[26,12,32,28],[36,4,44,14],[48,18,58,26]];
@@ -234,10 +231,15 @@ class Branch {
     for(const c of this.path) this.pathSet.add(key(c));
     this.stack = [];
     this.best = 0;
+    this.stepsWithoutProgress = 0;
+    this.parkCount = 0;
+    this.parked = false;
   }
   clone(){
     const b = new Branch(this.cell, this.path, this.cameFrom);
     b.best = this.best;
+    b.stepsWithoutProgress = this.stepsWithoutProgress;
+    b.parkCount = 0;
     b.stack = this.stack.map(s => ({
       cell: s.cell,
       options: s.options.slice(),
@@ -252,16 +254,23 @@ class LSB {
   constructor(grid, start, goal, opts={}){
     this.grid=grid; this.start=start; this.goal=goal;
     this.name="LSB";
-    this.max_branches   = opts.max_branches   ?? 16;
-    this.scar_threshold = opts.scar_threshold ?? 2.5;
-    this.scar_decay     = opts.scar_decay     ?? 0.004;
-    this.tryEps         = opts.tryEps         ?? 0.5;
+    this.max_branches        = opts.max_branches        ?? 16;
+    this.scar_threshold      = opts.scar_threshold      ?? 2.5;
+    this.scar_decay          = opts.scar_decay          ?? 0.004;
+    this.tryEps              = opts.tryEps              ?? 0.5;
+    this.progressThreshold   = opts.progressThreshold   ?? 100;
+    this.maxParksPerBranch   = opts.maxParksPerBranch   ?? 3;
+    this.minActive           = opts.minActive           ?? 4;
+
     this.scar = new Map();
     const b = new Branch(start, [start], null);
     b.best = manhattan(start, goal);
-    this.branches=[b];
+    this.branches = [b];
+    this.parked = [];
     this.done=false; this.path=null; this.expanded=0; this.tick=0;
-    this.backtracks=0; this.elapsed=null;
+    this.backtracks=0;
+    this.parks=0; this.resumes=0; this.kills=0;
+    this.elapsed=null;
     this.visited = new Set([key(start)]);
     this.frontier = new Set([key(start)]);
     this.dead = new Set();
@@ -271,7 +280,11 @@ class LSB {
 
   step(budget){
     for(let i=0; i<budget && !this.done; i++){
-      if(this.branches.length === 0){ this.done=true; return; }
+      // If no active branches, unpark the best ones
+      if(this.branches.length === 0){
+        if(this.parked.length === 0){ this.done = true; return; }
+        this._unpark();
+      }
       this.tick++;
       const next = [];
       for(const b of this.branches){
@@ -281,6 +294,7 @@ class LSB {
       next.sort((a,b) => a.best - b.best);
       this.branches = next.slice(0, this.max_branches);
       this.frontier = new Set(this.branches.map(b => key(b.cell)));
+
       if(this.scar_decay>0 && this.tick%60===0){
         for(const k of Array.from(this.scar.keys())){
           const v = this.scar.get(k)*(1-this.scar_decay);
@@ -290,23 +304,66 @@ class LSB {
     }
   }
 
+  _unpark(){
+    this.parked.sort((a,b) => a.best - b.best);
+    const n = Math.min(this.minActive, this.parked.length);
+    for(let j=0; j<n; j++){
+      const b = this.parked.shift();
+      b.stepsWithoutProgress = 0;
+      b.parked = false;
+      this.branches.push(b);
+      this.resumes++;
+    }
+  }
+
+  _updateProgress(b, stepCell){
+    const k = key(stepCell);
+    const isNew = !this.visited.has(k);
+    this.visited.add(k);
+    if(isNew){
+      b.stepsWithoutProgress = 0;
+    } else {
+      b.stepsWithoutProgress++;
+    }
+  }
+
+  // returns true if branch was parked or killed (should NOT be added to next)
+  _checkPark(b){
+    if(b.stepsWithoutProgress < this.progressThreshold) return false;
+    b.parkCount++;
+    if(b.parkCount >= this.maxParksPerBranch){
+      for(const c of b.path){ this._scarAdd(c, 0.5); this.dead.add(key(c)); }
+      this.kills++;
+      return true;
+    }
+    b.parked = true;
+    this.parked.push(b);
+    this.parks++;
+    return true;
+  }
+
   stepBranch(b, next){
     if(b.cell[0]===this.goal[0] && b.cell[1]===this.goal[1]){
       this.done=true; this.path=b.path; return;
     }
     const opts = neighbors(this.grid, b.cell).filter(n => !b.pathSet.has(key(n)));
+
     if(opts.length === 0){
+      // no forward option → backtrack
       const dead = this.backtrack(b, next);
-      if(!dead) next.push(b);
+      if(dead) return;              // truly exhausted, killed inside backtrack
+      this._updateProgress(b, b.cell);
+      if(this._checkPark(b)) return;
+      next.push(b);
       return;
     }
+
     opts.sort((p,q) => euclid(p, this.goal) - euclid(q, this.goal));
     const primary = opts[0];
 
     if(opts.length > 1){
       const bestD = euclid(primary, this.goal);
       const tied = opts.filter(o => Math.abs(euclid(o, this.goal) - bestD) < this.tryEps);
-
       if(tied.length > 1){
         for(let i=1; i<tied.length; i++){
           if(next.length + this.branches.length >= this.max_branches) break;
@@ -347,7 +404,6 @@ class LSB {
     b.pathSet.add(key(primary));
     b.cameFrom = b.cell;
     b.cell = primary;
-    this.visited.add(key(primary));
     this.expanded++;
     const d = manhattan(primary, this.goal);
     if(d < b.best) b.best = d;
@@ -355,6 +411,9 @@ class LSB {
     if(primary[0]===this.goal[0] && primary[1]===this.goal[1]){
       this.done=true; this.path=b.path; return;
     }
+
+    this._updateProgress(b, primary);
+    if(this._checkPark(b)) return;
     next.push(b);
   }
 
@@ -373,7 +432,6 @@ class LSB {
         b.pathSet.add(key(nt));
         b.cameFrom = top.cell;
         b.cell = nt;
-        this.visited.add(key(nt));
         this.expanded++;
         const d = manhattan(nt, this.goal);
         if(d < b.best) b.best = d;
@@ -388,6 +446,7 @@ class LSB {
       this._scarAdd(c, 0.5);
       this.dead.add(key(c));
     }
+    this.kills++;
     return true;
   }
 }
@@ -402,13 +461,14 @@ const ctxL = cL.getContext('2d');
 
 const COLOR = {
   wall:'#555', open:'#000', start:'#0a0', goal:'#c0c',
-  frontier:'#ff0', visited:'#2a4a7a', path:'#0ff', dead:'#a00'
+  frontier:'#ff0', parked:'#f80', visited:'#2a4a7a', path:'#0ff', dead:'#a00'
 };
 
 function draw(ctx, grid, algo){
   ctx.fillStyle = COLOR.open;
   ctx.fillRect(0,0,ctx.canvas.width,ctx.canvas.height);
   const pathSet = algo.path ? new Set(algo.path.map(key)) : null;
+  const parkedSet = algo.parked ? new Set(algo.parked.map(b => key(b.cell))) : null;
   for(let y=0;y<H;y++){
     for(let x=0;x<W;x++){
       const k = y*W+x;
@@ -416,6 +476,7 @@ function draw(ctx, grid, algo){
       if(grid[y][x]===1) col = COLOR.wall;
       else if(algo.dead && algo.dead.has(k)) col = COLOR.dead;
       else if(algo.visited.has(k)) col = COLOR.visited;
+      if(parkedSet && parkedSet.has(k)) col = COLOR.parked;
       if(algo.frontier.has(k)) col = COLOR.frontier;
       if(pathSet && pathSet.has(k)) col = COLOR.path;
       if(x===START[0]&&y===START[1]) col = COLOR.start;
@@ -431,6 +492,8 @@ function stats(algo){
           `path length: <b>${algo.path?algo.path.length:'—'}</b><br>` +
           `frontier: <b>${algo.frontier.size}</b><br>`;
   if(algo.backtracks !== undefined) s += `backtracks: <b>${algo.backtracks}</b><br>`;
+  if(algo.parks !== undefined) s += `parks: <b>${algo.parks}</b>  resumes: <b>${algo.resumes}</b><br>` +
+                                    `kills: <b>${algo.kills}</b>  parked: <b>${algo.parked.length}</b><br>`;
   s += `done: <b>${algo.done}</b><br>`;
   s += `time: <b>${algo.elapsed !== null ? (algo.elapsed/1000).toFixed(2)+'s' : '…'}</b>`;
   return s;
@@ -494,13 +557,10 @@ function loop(now){
 }
 
 // ---------- mass test ----------
-// Runs N random perfect mazes headless. Same start/goal per maze.
-// Caps iterations so a stuck algorithm is marked DNF rather than hanging.
 const MASS_N = 10;
 const MASS_MAX_ITERS = 20000;
 
-function runOne(grid, algo){
-  // algo is a fresh instance. Step until done or cap.
+function runOne(algo){
   const t0 = performance.now();
   let iters = 0;
   while(!algo.done && iters < MASS_MAX_ITERS){
@@ -514,83 +574,70 @@ function runOne(grid, algo){
     unique: algo.visited.size,
     pathLen: algo.path ? algo.path.length : null,
     backtracks: algo.backtracks !== undefined ? algo.backtracks : null,
+    parks: algo.parks !== undefined ? algo.parks : null,
+    resumes: algo.resumes !== undefined ? algo.resumes : null,
+    kills: algo.kills !== undefined ? algo.kills : null,
     ms
   };
 }
 
 function massTest(){
-  // Pause the live animation so it doesn't fight for the frame.
   paused = true;
   document.getElementById('pauseBtn').innerText = 'Resume';
   const out = document.getElementById('results');
   out.style.display = 'block';
-  out.textContent = 'Running ' + MASS_N + ' perfect mazes...\n';
+  out.textContent = 'Running ' + MASS_N + ' perfect mazes...';
 
-  // Defer so the "Running..." message paints before the synchronous block.
   setTimeout(() => {
     const rows = [];
-    let aWins = 0, lWins = 0, ties = 0;
-    let sumATime=0, sumLTime=0, sumAUniq=0, sumLUniq=0, sumAPath=0, sumLPath=0, sumLBT=0;
+    let aWins=0, lWins=0, ties=0;
+    let sumATime=0, sumLTime=0, sumAUniq=0, sumLUniq=0;
+    let sumAPath=0, sumLPath=0, sumLBT=0, sumLParks=0, sumLRes=0, sumLKills=0;
     let aDNF=0, lDNF=0;
 
     for(let i=1; i<=MASS_N; i++){
       const g = makePerfectMaze(i * 1013);
-      const S = [1,1];
-      const G = [W-3,H-3];
-      const aa = new AStar(g, S, G);
-      const ll = new LSB(g, S, G);
-      const ra = runOne(g, aa);
-      const rl = runOne(g, ll);
+      const S = [1,1], G = [W-3,H-3];
+      const ra = runOne(new AStar(g, S, G));
+      const rl = runOne(new LSB(g, S, G));
 
-      sumATime += ra.ms;
-      sumLTime += rl.ms;
-      sumAUniq += ra.unique;
-      sumLUniq += rl.unique;
-      sumAPath += ra.pathLen ?? 0;
-      sumLPath += rl.pathLen ?? 0;
-      sumLBT   += rl.backtracks ?? 0;
+      sumATime+=ra.ms; sumLTime+=rl.ms;
+      sumAUniq+=ra.unique; sumLUniq+=rl.unique;
+      sumAPath+=ra.pathLen??0; sumLPath+=rl.pathLen??0;
+      sumLBT += rl.backtracks??0;
+      sumLParks += rl.parks??0;
+      sumLRes += rl.resumes??0;
+      sumLKills += rl.kills??0;
       if(!ra.done) aDNF++;
       if(!rl.done) lDNF++;
 
-      // "winner" = fewer unique cells (fairer than wall time on JS engines)
       let verdict;
-      if(!rl.done) verdict = 'A* (LSB DNF)';
+      if(!rl.done && !ra.done) verdict = 'both DNF';
+      else if(!rl.done) verdict = 'A* (LSB DNF)';
       else if(!ra.done) verdict = 'LSB (A* DNF)';
-      else if(rl.unique < ra.unique) { verdict = 'LSB'; lWins++; }
-      else if(ra.unique < rl.unique) { verdict = 'A*';  aWins++; }
+      else if(rl.unique < ra.unique){ verdict = 'LSB'; lWins++; }
+      else if(ra.unique < rl.unique){ verdict = 'A*';  aWins++; }
       else { verdict = 'tie'; ties++; }
 
-      rows.push({
-        seed: i*1013,
-        aTime: ra.ms, lTime: rl.ms,
-        aUniq: ra.unique, lUniq: rl.unique,
-        aPath: ra.pathLen, lPath: rl.pathLen,
-        lBT: rl.backtracks,
-        aDone: ra.done, lDone: rl.done,
-        verdict
-      });
+      rows.push({ seed:i*1013, aTime:ra.ms, lTime:rl.ms,
+                  aUniq:ra.unique, lUniq:rl.unique,
+                  aPath:ra.pathLen, lPath:rl.pathLen,
+                  lBT:rl.backtracks, lParks:rl.parks, lRes:rl.resumes, lKills:rl.kills,
+                  aDone:ra.done, lDone:rl.done, verdict });
     }
 
-    const pad = (s, n) => {
-      s = String(s);
-      while(s.length < n) s += ' ';
-      return s.slice(0, n);
-    };
-    const padL = (s, n) => {
-      s = String(s);
-      while(s.length < n) s = ' ' + s;
-      return s.slice(-n);
-    };
+    const pad = (s,n)=>{ s=String(s); while(s.length<n) s+=' '; return s.slice(0,n); };
+    const padL= (s,n)=>{ s=String(s); while(s.length<n) s=' '+s; return s.slice(-n); };
 
     let txt = '';
-    txt += 'MASS TEST — ' + MASS_N + ' perfect mazes (size ' + W + 'x' + H + ')\n';
-    txt += 'Winner by unique-cells-touched (lower is better).\n';
-    txt += '\n';
-    txt += pad('seed',7) + padL('A*ms',8) + padL('LSBms',8) +
-           padL('A*uniq',8) + padL('LSBuniq',9) +
-           padL('A*path',8) + padL('LSBpath',9) +
-           padL('LSBbt',7) + '  verdict\n';
-    txt += '─'.repeat(7+8+8+8+9+8+9+7+10) + '\n';
+    txt += 'MASS TEST — ' + MASS_N + ' perfect mazes (' + W + 'x' + H + ')\n';
+    txt += 'Winner by unique-cells-touched (lower is better).\n\n';
+    txt += pad('seed',7) + padL('A*ms',8) + padL('LSBms',8)
+         + padL('A*uniq',8) + padL('LSBuniq',9)
+         + padL('A*path',8) + padL('LSBpath',9)
+         + padL('LSBbt',7) + padL('park',6) + padL('res',5) + padL('kill',6)
+         + '  verdict\n';
+    txt += '─'.repeat(7+8+8+8+9+8+9+7+6+5+6+10) + '\n';
     for(const r of rows){
       txt += pad(r.seed, 7)
           + padL(r.aTime.toFixed(1), 8)
@@ -600,9 +647,12 @@ function massTest(){
           + padL(r.aPath ?? '—', 8)
           + padL(r.lPath ?? '—', 9)
           + padL(r.lBT ?? '—', 7)
+          + padL(r.lParks ?? '—', 6)
+          + padL(r.lRes ?? '—', 5)
+          + padL(r.lKills ?? '—', 6)
           + '  ' + r.verdict + '\n';
     }
-    txt += '─'.repeat(7+8+8+8+9+8+9+7+10) + '\n';
+    txt += '─'.repeat(7+8+8+8+9+8+9+7+6+5+6+10) + '\n';
     txt += pad('AVG', 7)
         + padL((sumATime/MASS_N).toFixed(1), 8)
         + padL((sumLTime/MASS_N).toFixed(1), 8)
@@ -611,14 +661,17 @@ function massTest(){
         + padL((sumAPath/MASS_N).toFixed(0), 8)
         + padL((sumLPath/MASS_N).toFixed(0), 9)
         + padL((sumLBT/MASS_N).toFixed(0), 7)
+        + padL((sumLParks/MASS_N).toFixed(0), 6)
+        + padL((sumLRes/MASS_N).toFixed(0), 5)
+        + padL((sumLKills/MASS_N).toFixed(0), 6)
         + '\n\n';
     txt += 'WINS  A*: ' + aWins + '   LSB: ' + lWins + '   tie: ' + ties + '\n';
-    txt += 'DNF   A*: ' + aDNF + '   LSB: ' + lDNF + '\n';
-    txt += '\n';
-    txt += 'Totals over ' + MASS_N + ' mazes:\n';
-    txt += '  A*  total unique: ' + sumAUniq + '   total time: ' + sumATime.toFixed(0) + ' ms\n';
-    txt += '  LSB total unique: ' + sumLUniq + '   total time: ' + sumLTime.toFixed(0) + ' ms\n';
-    txt += '  LSB total backtracks: ' + sumLBT + '\n';
+    txt += 'DNF   A*: ' + aDNF + '   LSB: ' + lDNF + '\n\n';
+    txt += 'Totals:\n';
+    txt += '  A*  unique: ' + sumAUniq + '   time: ' + sumATime.toFixed(0) + ' ms\n';
+    txt += '  LSB unique: ' + sumLUniq + '   time: ' + sumLTime.toFixed(0) + ' ms\n';
+    txt += '  LSB backtracks: ' + sumLBT + '   parks: ' + sumLParks
+         + '   resumes: ' + sumLRes + '   kills: ' + sumLKills + '\n';
 
     out.textContent = txt;
   }, 30);
