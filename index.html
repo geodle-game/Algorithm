@@ -90,17 +90,10 @@
 <script>
 var W = 100, H = 50;
 var CELL = 5;
-
-// ---- RECORDING: one frame = one atomic step of each algorithm ----
-// A*: one frame = one cell expanded
-// LSB: one frame = one layer (every active branch moves one cell)
 var RECORD_BUDGET = 1;
 var RECORD_MAX_FRAMES = 15000;
-
-// ---- mass test can use bigger chunks since it isn't recording ----
 var MASS_BUDGET = 8;
-
-var TICK_DELAY = 16;              // ms per playback frame
+var TICK_DELAY = 16;
 var PLAYBACK_SPEED = 1;
 
 var START = [0, 0];
@@ -451,6 +444,7 @@ function LSB(g, start, goal){
   this.done = false; this.exhausted = false; this.path = null;
   this.tick = 0; this.lastNovelTick = 0;
   this.backtracks = 0; this.parks = 0; this.resumes = 0; this.kills = 0;
+  this.earlyDeaths = 0;
   this.algMs = 0;
 }
 
@@ -483,11 +477,9 @@ LSB.prototype._shouldPark = function(b){
   return b.scoreCache > median * 1.5;
 };
 
-// One call to step() = `budget` layers. Each layer = all branches move one cell.
 LSB.prototype.step = function(budget){
   var t0 = performance.now();
   for(var i=0; i<budget && !this.done; i++){
-    // ---- one layer ----
     if(this.branches.length === 0){
       if(this.parked.length === 0){ this.done = true; this.exhausted = true; break; }
       this._unpark(this.minActive);
@@ -558,25 +550,45 @@ LSB.prototype.stepBranch = function(b, next){
   var x0 = b.cell[0], y0 = b.cell[1];
   var grid = this.grid;
   var opts = [];
-  var kk;
 
-  if(x0 + 1 < W && grid[y0][x0 + 1] === 0){
-    kk = y0 * W + (x0 + 1);
-    if(!b.pathSet[kk]) opts.push([x0 + 1, y0, kk]);
-  }
-  if(x0 - 1 >= 0 && grid[y0][x0 - 1] === 0){
-    kk = y0 * W + (x0 - 1);
-    if(!b.pathSet[kk]) opts.push([x0 - 1, y0, kk]);
-  }
-  if(y0 + 1 < H && grid[y0 + 1][x0] === 0){
-    kk = (y0 + 1) * W + x0;
-    if(!b.pathSet[kk]) opts.push([x0, y0 + 1, kk]);
-  }
-  if(y0 - 1 >= 0 && grid[y0 - 1][x0] === 0){
-    kk = (y0 - 1) * W + x0;
-    if(!b.pathSet[kk]) opts.push([x0, y0 - 1, kk]);
+  // Enumerate neighbors with pre-emptive dead-end detection.
+  // A neighbor is a "global dead end" if it has exactly one open neighbor total
+  // (or zero). That one open neighbor is us. Stepping in is pointless.
+  for(var i=0; i<4; i++){
+    var nx = x0 + N4[i][0];
+    var ny = y0 + N4[i][1];
+    if(nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+    if(grid[ny][nx] !== 0) continue;
+    var kk = ny * W + nx;
+    if(b.pathSet[kk]) continue;
+
+    // Goal is always a valid option, bypass dead-end filter
+    if(kk === this.goalK){ opts.push([nx, ny, kk]); continue; }
+
+    // Already known dead — skip without re-scanning
+    if(this.dead[kk]) continue;
+
+    // Count open neighbors of the candidate cell
+    var openCount = 0;
+    if(nx + 1 < W && grid[ny][nx + 1] === 0) openCount++;
+    if(nx - 1 >= 0 && grid[ny][nx - 1] === 0) openCount++;
+    if(ny + 1 < H && grid[ny + 1][nx] === 0) openCount++;
+    if(ny - 1 >= 0 && grid[ny - 1][nx] === 0) openCount++;
+
+    // openCount <= 1 means: only open neighbor is us (the cell we'd step from).
+    // If it's 0, isolated. Either way, no future.
+    if(openCount <= 1){
+      this.scar[kk] += 1.0;
+      this.scarKeys[kk] = 1;
+      this.dead[kk] = 1;
+      this.earlyDeaths++;
+      continue;
+    }
+
+    opts.push([nx, ny, kk]);
   }
 
+  // No usable forward options → backtrack immediately, don't waste a step
   if(opts.length === 0){
     if(this.backtrack(b, next)) return;
     next.push(b);
@@ -655,6 +667,11 @@ LSB.prototype.backtrack = function(b, next){
     if(top.nextIdx < top.options.length){
       var nt = top.options[top.nextIdx];
       top.nextIdx++;
+
+      // Skip options that were global dead ends (defensive — they're already filtered
+      // at push time, but if a fork inherited stale options this catches them).
+      if(this.dead[nt[2]] && nt[2] !== this.goalK) continue;
+
       for(var i = b.path.length - 1; i > top.pathIdx; i--){
         var c = b.path[i];
         b.pathSet[c[1]*W + c[0]] = 0;
@@ -702,6 +719,7 @@ function getStats(algo, isLSB){
     parks: isLSB ? algo.parks : null,
     resumes: isLSB ? algo.resumes : null,
     kills: isLSB ? algo.kills : null,
+    earlyDeaths: isLSB ? algo.earlyDeaths : null,
     parkedCount: isLSB ? algo.parked.length : null,
     algMs: algo.algMs,
     isLSB: isLSB
@@ -709,8 +727,6 @@ function getStats(algo, isLSB){
 }
 
 // =============== recording ===============
-// One recorded frame = one atomic step of the algorithm.
-// A*: one expansion. LSB: one layer (all branches move one cell).
 function recordFrames(algo, isLSB){
   var frames = [];
   var prevVisited = {};
@@ -861,6 +877,7 @@ function fmtStats(stats){
   if(stats.isLSB){
     s += 'bt: <b>' + stats.backtracks + '</b>  parks: <b>' + stats.parks + '</b>  res: <b>' + stats.resumes + '</b><br>';
     s += 'kills: <b>' + stats.kills + '</b>  parked: <b>' + stats.parkedCount + '</b><br>';
+    s += 'early dead-ends: <b>' + stats.earlyDeaths + '</b><br>';
   }
   s += 'done: <b>' + stats.done + '</b>';
   if(stats.exhausted) s += ' <span style="color:#f88">(exhausted)</span>';
@@ -992,7 +1009,7 @@ function runOneOnce(factory, isLSB){
   var iters = 0;
   while(!algo.done && iters < 60000){ algo.step(MASS_BUDGET); iters++; }
   var s = getStats(algo, isLSB);
-  return { stats: s, algMs: algo.algMs, backtracks: s.backtracks, parks: s.parks, resumes: s.resumes, kills: s.kills };
+  return { stats: s, algMs: algo.algMs, backtracks: s.backtracks, parks: s.parks, resumes: s.resumes, kills: s.kills, earlyDeaths: s.earlyDeaths };
 }
 function runBench(factory, isLSB){
   var totalMs = 0, reps = 0, last = null;
@@ -1003,7 +1020,7 @@ function runBench(factory, isLSB){
   }
   return {
     stats: last.stats, backtracks: last.backtracks, parks: last.parks,
-    resumes: last.resumes, kills: last.kills,
+    resumes: last.resumes, kills: last.kills, earlyDeaths: last.earlyDeaths,
     avgMs: totalMs / reps, reps: reps
   };
 }
@@ -1027,7 +1044,7 @@ function massTest(reuse){
     }
     var rows = [];
     var aSuccess = 0, lSuccess = 0, aWins = 0, lWins = 0, ties = 0;
-    var acc = { aTime:0, lTime:0, aExp:0, lExp:0, aPath:0, lPath:0, lBT:0, lParks:0, lRes:0, lKills:0, n:0 };
+    var acc = { aTime:0, lTime:0, aExp:0, lExp:0, aPath:0, lPath:0, lBT:0, lParks:0, lRes:0, lKills:0, lED:0, n:0 };
     for(var pi=0; pi<plans.length; pi++){
       var plan = plans[pi];
       var g = plan.fn(plan.seed);
@@ -1050,6 +1067,7 @@ function massTest(reuse){
         acc.aPath += ra.stats.pathLen || 0; acc.lPath += rl.stats.pathLen || 0;
         acc.lBT += rl.backtracks || 0; acc.lParks += rl.parks || 0;
         acc.lRes += rl.resumes || 0; acc.lKills += rl.kills || 0;
+        acc.lED += rl.earlyDeaths || 0;
         acc.n++;
       }
       rows.push({
@@ -1060,6 +1078,7 @@ function massTest(reuse){
         aPath: ra.stats.pathLen, lPath: rl.stats.pathLen,
         aSuccess: aOk, lSuccess: lOk, lReason: rl.stats.pathReason,
         lBT: rl.backtracks, lParks: rl.parks, lRes: rl.resumes, lKills: rl.kills,
+        lED: rl.earlyDeaths,
         verdict: verdict
       });
     }
@@ -1070,8 +1089,8 @@ function massTest(reuse){
     txt += 'Verdict by expanded-cells. Success requires validated path.\n\n';
     txt += pad('type', 9) + padL('seed', 12) + padL('A*t', 10) + padL('LSBt', 10)
          + padL('A*exp', 8) + padL('LSBexp', 9) + padL('A*pth', 7) + padL('LSBpth', 8)
-         + padL('ok', 4) + padL('rep', 7) + padL('LSBbt', 8) + padL('park', 6) + padL('res', 5) + padL('kill', 6) + '  verdict\n';
-    txt += '------------------------------------------------------------------------------------\n';
+         + padL('ok', 4) + padL('rep', 7) + padL('LSBbt', 8) + padL('park', 6) + padL('res', 5) + padL('kill', 6) + padL('eDead', 7) + '  verdict\n';
+    txt += '-----------------------------------------------------------------------------------------------\n';
     for(var ri=0; ri<rows.length; ri++){
       var r = rows[ri];
       txt += pad(r.type, 9) + padL(r.seed.toString(16), 12)
@@ -1082,10 +1101,11 @@ function massTest(reuse){
           + padL(r.aReps + '/' + r.lReps, 7)
           + padL(r.lBT === null ? '-' : r.lBT, 8) + padL(r.lParks === null ? '-' : r.lParks, 6)
           + padL(r.lRes === null ? '-' : r.lRes, 5) + padL(r.lKills === null ? '-' : r.lKills, 6)
+          + padL(r.lED === null ? '-' : r.lED, 7)
           + '  ' + r.verdict + '\n';
       if(!r.lSuccess && r.lReason && r.lReason !== 'no path') txt += '  LSB path invalid: ' + r.lReason + '\n';
     }
-    txt += '------------------------------------------------------------------------------------\n';
+    txt += '-----------------------------------------------------------------------------------------------\n';
     if(acc.n > 0){
       txt += pad('AVG', 9) + padL('', 12)
           + padL(fmtTime(acc.aTime/acc.n), 10) + padL(fmtTime(acc.lTime/acc.n), 10)
@@ -1094,6 +1114,7 @@ function massTest(reuse){
           + padL('', 4) + padL('', 7)
           + padL(Math.round(acc.lBT/acc.n), 8) + padL(Math.round(acc.lParks/acc.n), 6)
           + padL(Math.round(acc.lRes/acc.n), 5) + padL(Math.round(acc.lKills/acc.n), 6)
+          + padL(Math.round(acc.lED/acc.n), 7)
           + '  (n=' + acc.n + ')\n';
     }
     txt += '\nSUCCESS  A*: ' + aSuccess + '/' + MASS_N + '   LSB: ' + lSuccess + '/' + MASS_N + '\n';
@@ -1105,13 +1126,15 @@ function massTest(reuse){
       for(var si=0; si<rows.length; si++)
         if(rows[si].type === t2.name && rows[si].aSuccess && rows[si].lSuccess) sub.push(rows[si]);
       if(sub.length === 0){ txt += '  ' + pad(t2.name, 9) + '  (none)\n'; continue; }
-      var aAvgSum = 0, lAvgSum = 0, lBTSum = 0;
+      var aAvgSum = 0, lAvgSum = 0, lBTSum = 0, lEDSum = 0;
       for(var xi=0; xi<sub.length; xi++){
-        aAvgSum += sub[xi].aExp; lAvgSum += sub[xi].lExp; lBTSum += sub[xi].lBT || 0;
+        aAvgSum += sub[xi].aExp; lAvgSum += sub[xi].lExp;
+        lBTSum += sub[xi].lBT || 0; lEDSum += sub[xi].lED || 0;
       }
       txt += '  ' + pad(t2.name, 9) + '  A* exp ' + padL(Math.round(aAvgSum/sub.length), 7)
            + '   LSB exp ' + padL(Math.round(lAvgSum/sub.length), 7)
            + '   LSB avg bt ' + padL(Math.round(lBTSum/sub.length), 7)
+           + '   LSB earlyDead ' + padL(Math.round(lEDSum/sub.length), 7)
            + '   n=' + sub.length + '\n';
     }
     out.textContent = txt;
