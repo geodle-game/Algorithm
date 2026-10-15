@@ -17,6 +17,7 @@
            border-radius:5px; font-family:monospace; font-size:13px; margin:3px; }
   button:active { background:#444; }
   button.speed-on { background:#3a5a3a; border-color:#7a7a7a; }
+  button.size-on { background:#5a3a3a; border-color:#a77; }
   pre#results { background:#0a0a0a; padding:10px; border-radius:6px; font-size:11px;
                 line-height:1.4; overflow-x:auto; color:#ddd; margin-top:10px;
                 border:1px solid #333; white-space:pre; }
@@ -27,6 +28,14 @@
 <body>
 
 <div class="banner" id="banner">Calculating...</div>
+
+<div class="panel" style="margin-bottom:8px;">
+  <span style="color:#888;font-size:12px;margin-right:6px;">Size:</span>
+  <button class="size-btn" data-w="60"  data-h="30"  onclick="setSize(60,30)">60x30</button>
+  <button class="size-btn" data-w="100" data-h="50"  onclick="setSize(100,50)">100x50</button>
+  <button class="size-btn" data-w="150" data-h="75"  onclick="setSize(150,75)">150x75</button>
+  <button class="size-btn" data-w="200" data-h="100" onclick="setSize(200,100)">200x100</button>
+</div>
 
 <div class="panel" style="margin-bottom:8px;">
   <button onclick="setScenario('open')">Open</button>
@@ -76,19 +85,19 @@
 <pre id="results" style="display:none"></pre>
 
 <script>
-var W = 200, H = 100;
-var CELL = 3;
+var W = 100, H = 50;
+var CELL = 5;
 var TICK_DELAY = 16;
 var BUDGET_PER_TICK = 8;
-var RECORD_MAX_TICKS = 20000;
+var RECORD_STRIDE = 8;
+var MAX_FRAMES = 3000;
 var MASS_MAX_ITERS = 60000;
 var PLAYBACK_SPEED = 1;
 
 var START = [0, 0];
-var GOAL  = [W-1, H-1];
+var GOAL = [W-1, H-1];
 var grid = null;
 
-// ---- rng ----
 function rng(seed){
   var s = seed >>> 0;
   return function(){
@@ -104,7 +113,6 @@ function freshSeed(){
   return (t ^ r ^ (seedCounter * 2654435761)) >>> 0;
 }
 
-// ---- grid generators ----
 function makeOpen(){
   var g = [];
   for(var y=0; y<H; y++){
@@ -116,13 +124,8 @@ function makeOpen(){
 }
 
 function makeSparse(){
-  var g = [];
-  for(var y=0; y<H; y++){
-    var row = [];
-    for(var x=0; x<W; x++) row.push(0);
-    g.push(row);
-  }
-  var sx = W / 60, sy = H / 30;
+  var g = makeOpen();
+  var sx = W/60, sy = H/30;
   var blocks = [[10,5,16,24],[26,12,32,28],[36,4,44,14],[48,18,58,26]];
   for(var i=0; i<blocks.length; i++){
     var b = blocks[i];
@@ -152,14 +155,9 @@ function makeRandom(density, seed){
   return g;
 }
 
-function roomDims(){
-  return [Math.floor((W-1)/2), Math.floor((H-1)/2)];
-}
-
 function makeMazeDFS(seed){
   var r = rng(seed);
-  var dims = roomDims();
-  var rx = dims[0], ry = dims[1];
+  var rx = Math.floor((W-1)/2), ry = Math.floor((H-1)/2);
   var g = [];
   for(var y=0; y<H; y++){
     var row = [];
@@ -185,11 +183,10 @@ function makeMazeDFS(seed){
     }
     var moved = false;
     for(var k=0; k<dirs.length; k++){
-      var dx = dirs[k][0], dy = dirs[k][1];
-      var nx = cx + dx, ny = cy + dy;
+      var nx = cx + dirs[k][0], ny = cy + dirs[k][1];
       if(nx<0 || nx>=rx || ny<0 || ny>=ry) continue;
       if(visited[ny][nx]) continue;
-      g[cy*2+1+dy][cx*2+1+dx] = 0;
+      g[cy*2+1+dirs[k][1]][cx*2+1+dirs[k][0]] = 0;
       g[ny*2+1][nx*2+1] = 0;
       visited[ny][nx] = true;
       stack.push([nx,ny]);
@@ -203,8 +200,7 @@ function makeMazeDFS(seed){
 
 function makeMazePrim(seed){
   var r = rng(seed);
-  var dims = roomDims();
-  var rx = dims[0], ry = dims[1];
+  var rx = Math.floor((W-1)/2), ry = Math.floor((H-1)/2);
   var g = [];
   for(var y=0; y<H; y++){
     var row = [];
@@ -220,9 +216,9 @@ function makeMazePrim(seed){
   var frontier = [];
   inMaze[0][0] = true;
   g[1][1] = 0;
-  var seedDirs = [[1,0],[-1,0],[0,1],[0,-1]];
-  for(var i=0; i<seedDirs.length; i++){
-    var nx = seedDirs[i][0], ny = seedDirs[i][1];
+  var dirs4 = [[1,0],[-1,0],[0,1],[0,-1]];
+  for(var i=0; i<dirs4.length; i++){
+    var nx = dirs4[i][0], ny = dirs4[i][1];
     if(nx>=0 && nx<rx && ny>=0 && ny<ry) frontier.push([nx,ny,0,0]);
   }
   while(frontier.length > 0){
@@ -233,8 +229,8 @@ function makeMazePrim(seed){
     g[ny2*2+1][nx2*2+1] = 0;
     g[py*2+1 + (ny2-py)][px*2+1 + (nx2-px)] = 0;
     inMaze[ny2][nx2] = true;
-    for(var k=0; k<seedDirs.length; k++){
-      var ax = nx2 + seedDirs[k][0], ay = ny2 + seedDirs[k][1];
+    for(var k=0; k<dirs4.length; k++){
+      var ax = nx2 + dirs4[k][0], ay = ny2 + dirs4[k][1];
       if(ax>=0 && ax<rx && ay>=0 && ay<ry && !inMaze[ay][ax]) frontier.push([ax,ay,nx2,ny2]);
     }
   }
@@ -243,8 +239,7 @@ function makeMazePrim(seed){
 
 function makeMazeKruskal(seed){
   var r = rng(seed);
-  var dims = roomDims();
-  var rx = dims[0], ry = dims[1];
+  var rx = Math.floor((W-1)/2), ry = Math.floor((H-1)/2);
   var g = [];
   for(var y=0; y<H; y++){
     var row = [];
@@ -280,9 +275,7 @@ function makeMazeKruskal(seed){
     var rb = find(wall[3]*rx + wall[2]);
     if(ra !== rb){
       parent[ra] = rb;
-      var wx = wall[0]*2+1 + (wall[2]-wall[0]);
-      var wy = wall[1]*2+1 + (wall[3]-wall[1]);
-      g[wy][wx] = 0;
+      g[wall[1]*2+1 + (wall[3]-wall[1])][wall[0]*2+1 + (wall[2]-wall[0])] = 0;
     }
   }
   return g;
@@ -294,7 +287,6 @@ var MAZE_TYPES = [
   { name:'Kruskal', fn: makeMazeKruskal }
 ];
 
-// ---- helpers ----
 function manhattan(a,b){ return Math.abs(a[0]-b[0]) + Math.abs(a[1]-b[1]); }
 function euclid(a,b){ var dx = a[0]-b[0], dy = a[1]-b[1]; return Math.sqrt(dx*dx + dy*dy); }
 var N4 = [[1,0],[-1,0],[0,1],[0,-1]];
@@ -308,22 +300,31 @@ function neighbors(g, c){
   return out;
 }
 function key(c){ return c[1]*W + c[0]; }
+function countKeys(obj){
+  var n = 0;
+  for(var k in obj) if(obj[k]) n++;
+  return n;
+}
+function keysOf(obj){
+  var out = [];
+  for(var k in obj) if(obj[k]) out.push(parseInt(k,10));
+  return out;
+}
 
 function validatePath(g, path, start, goal){
   if(!path || path.length === 0) return { ok:false, reason:'empty path' };
   if(path[0][0] !== start[0] || path[0][1] !== start[1])
-    return { ok:false, reason:'does not start at START' };
+    return { ok:false, reason:'start mismatch' };
   var last = path[path.length-1];
   if(last[0] !== goal[0] || last[1] !== goal[1])
-    return { ok:false, reason:'does not end at GOAL' };
+    return { ok:false, reason:'goal mismatch' };
   for(var i=0; i<path.length; i++){
     var x = path[i][0], y = path[i][1];
-    if(x<0 || x>=W || y<0 || y>=H) return { ok:false, reason:'out of bounds at ' + i };
-    if(g[y][x] !== 0) return { ok:false, reason:'crosses wall at ' + i };
+    if(x<0 || x>=W || y<0 || y>=H) return { ok:false, reason:'OOB at ' + i };
+    if(g[y][x] !== 0) return { ok:false, reason:'wall at ' + i };
     if(i > 0){
       var px = path[i-1][0], py = path[i-1][1];
-      if(Math.abs(x-px) + Math.abs(y-py) !== 1)
-        return { ok:false, reason:'non-adjacent at ' + i };
+      if(Math.abs(x-px) + Math.abs(y-py) !== 1) return { ok:false, reason:'nonadj at ' + i };
     }
   }
   return { ok:true };
@@ -336,7 +337,6 @@ function fmtTime(ms){
   return (ms / 1000).toFixed(3) + 's';
 }
 
-// ---- MinHeap ----
 function MinHeap(){ this.h = []; }
 MinHeap.prototype.push = function(item){
   this.h.push(item);
@@ -369,7 +369,6 @@ Object.defineProperty(MinHeap.prototype, 'size', {
   get: function(){ return this.h.length; }
 });
 
-// ---- A* ----
 function AStar(g, start, goal){
   this.grid = g;
   this.start = start;
@@ -387,13 +386,11 @@ function AStar(g, start, goal){
   this.visited[key(start)] = true;
   this.generated[key(start)] = true;
   this.frontier[key(start)] = true;
-  this.expandedCount = 0;
   this.done = false;
   this.exhausted = false;
   this.path = null;
   this.algMs = 0;
 }
-
 AStar.prototype.step = function(budget){
   var t0 = performance.now();
   var spent = 0;
@@ -407,7 +404,6 @@ AStar.prototype.step = function(budget){
     this.closed[kc] = true;
     this.visited[kc] = true;
     this.expanded[kc] = true;
-    this.expandedCount++;
     delete this.frontier[kc];
     spent++;
     if(c[0] === this.goal[0] && c[1] === this.goal[1]){
@@ -434,7 +430,6 @@ AStar.prototype.step = function(budget){
   }
   this.algMs += performance.now() - t0;
 };
-
 AStar.prototype._recon = function(end){
   var p = [];
   var c = end;
@@ -446,13 +441,6 @@ AStar.prototype._recon = function(end){
   this.path = p;
 };
 
-AStar.prototype.sizeOf = function(obj){
-  var n = 0;
-  for(var k in obj) if(obj[k]) n++;
-  return n;
-};
-
-// ---- LSB ----
 function Branch(cell, path, cameFrom){
   this.cell = cell;
   this.path = path.slice();
@@ -468,7 +456,6 @@ Branch.prototype.clone = function(){
   var b = new Branch(this.cell, this.path, this.cameFrom);
   b.bestEver = this.bestEver;
   b.parkCount = 0;
-  b.stack = [];
   for(var i=0; i<this.stack.length; i++){
     var s = this.stack[i];
     b.stack.push({
@@ -488,15 +475,15 @@ function LSB(g, start, goal){
   this.grid = g;
   this.start = start;
   this.goal = goal;
-
-  this.max_branches      = 32;
-  this.max_parked        = 128;
+  var scale = Math.max(1, Math.floor((W*H) / 3000));
+  this.max_branches      = 16 * scale;
+  this.max_parked        = 32 * scale;
   this.scar_threshold    = 2.5;
   this.scar_decay        = 0.004;
   this.tryEps            = 0.5;
-  this.maxParksPerBranch = 5;
-  this.minActive         = 8;
-  this.stallThreshold    = 500;
+  this.maxParksPerBranch = 3;
+  this.minActive         = 4 * scale;
+  this.stallThreshold    = 200 * scale;
 
   this.scar = {};
   var b = new Branch(start, [start], null);
@@ -511,7 +498,6 @@ function LSB(g, start, goal){
   this.parks = 0;
   this.resumes = 0;
   this.kills = 0;
-
   this.visited = {};
   this.generated = {};
   this.expanded = {};
@@ -521,17 +507,15 @@ function LSB(g, start, goal){
   this.generated[key(start)] = true;
   this.frontier[key(start)] = true;
   this.algMs = 0;
+  this._visitedCount = 1;
 }
-
 LSB.prototype._scarAdd = function(c, amt){
   var k = key(c);
   this.scar[k] = (this.scar[k] || 0) + amt;
 };
-
 LSB.prototype.step = function(budget){
   var t0 = performance.now();
   var self = this;
-  var stop = false;
   for(var i=0; i<budget && !this.done; i++){
     if(this.branches.length === 0){
       if(this.parked.length === 0){
@@ -542,15 +526,14 @@ LSB.prototype.step = function(budget){
       this._unpark(this.minActive);
     }
     this.tick++;
-    var novelBefore = countKeys(this.visited);
-
+    var novelBefore = this._visitedCount;
     var next = [];
+    var stop = false;
     for(var bi=0; bi<this.branches.length; bi++){
       this.stepBranch(this.branches[bi], next);
       if(this.done){ stop = true; break; }
     }
     if(stop) break;
-
     next.sort(function(a,b){ return a.score() - b.score(); });
     var keep = next.slice(0, this.max_branches);
     var overflow = next.slice(this.max_branches);
@@ -569,20 +552,17 @@ LSB.prototype.step = function(budget){
         this.kills++;
       }
     }
-
     this.frontier = {};
     for(var fi=0; fi<this.branches.length; fi++){
       this.frontier[key(this.branches[fi].cell)] = true;
     }
-
-    var novelAfter = countKeys(this.visited);
+    var novelAfter = this._visitedCount;
     if(novelAfter > novelBefore){
       this.lastNovelTick = this.tick;
     } else if(this.tick - this.lastNovelTick > this.stallThreshold && this.parked.length > 0){
-      this._unpark(4);
+      this._unpark(this.minActive);
       this.lastNovelTick = this.tick;
     }
-
     if(this.scar_decay > 0 && this.tick % 60 === 0){
       for(var sk in this.scar){
         var v = this.scar[sk] * (1 - this.scar_decay);
@@ -593,7 +573,6 @@ LSB.prototype.step = function(budget){
   }
   this.algMs += performance.now() - t0;
 };
-
 LSB.prototype._unpark = function(n){
   this.parked.sort(function(a,b){ return a.score() - b.score(); });
   var take = Math.min(n, this.parked.length);
@@ -604,41 +583,35 @@ LSB.prototype._unpark = function(n){
     this.resumes++;
   }
 };
-
 LSB.prototype._addGenerated = function(c){
   var k = key(c);
   if(!this.visited[k]){
     this.visited[k] = true;
     this.generated[k] = true;
+    this._visitedCount++;
   }
 };
-
 LSB.prototype.stepBranch = function(b, next){
   if(b.cell[0] === this.goal[0] && b.cell[1] === this.goal[1]){
     this.done = true;
     this.path = b.path;
     return;
   }
-
   this.expanded[key(b.cell)] = true;
-
   var rawOpts = neighbors(this.grid, b.cell);
   var opts = [];
   for(var i=0; i<rawOpts.length; i++){
     if(!b.pathSet[key(rawOpts[i])]) opts.push(rawOpts[i]);
   }
-
   if(opts.length === 0){
     var dead = this.backtrack(b, next);
     if(dead) return;
     next.push(b);
     return;
   }
-
   var self = this;
   opts.sort(function(p,q){ return euclid(p, self.goal) - euclid(q, self.goal); });
   var primary = opts[0];
-
   if(opts.length > 1){
     var bestD = euclid(primary, this.goal);
     var tied = [];
@@ -678,7 +651,6 @@ LSB.prototype.stepBranch = function(b, next){
       });
     }
   }
-
   b.path.push(primary);
   b.pathSet[key(primary)] = true;
   b.cameFrom = b.cell;
@@ -686,13 +658,11 @@ LSB.prototype.stepBranch = function(b, next){
   this._addGenerated(primary);
   var d = manhattan(primary, this.goal);
   if(d < b.bestEver) b.bestEver = d;
-
   if(primary[0] === this.goal[0] && primary[1] === this.goal[1]){
     this.done = true;
     this.path = b.path;
     return;
   }
-
   if(b.parkCount < this.maxParksPerBranch && this._shouldPark(b)){
     b.parkCount++;
     if(this.parked.length < this.max_parked){
@@ -704,7 +674,6 @@ LSB.prototype.stepBranch = function(b, next){
   }
   next.push(b);
 };
-
 LSB.prototype._shouldPark = function(b){
   if(this.branches.length <= this.minActive) return false;
   var scored = [];
@@ -713,7 +682,6 @@ LSB.prototype._shouldPark = function(b){
   var median = scored[Math.floor(scored.length/2)];
   return b.score() > median * 1.5;
 };
-
 LSB.prototype.backtrack = function(b, next){
   this.backtracks++;
   while(b.stack.length > 0){
@@ -749,13 +717,6 @@ LSB.prototype.backtrack = function(b, next){
   return true;
 };
 
-function countKeys(obj){
-  var n = 0;
-  for(var k in obj) if(obj[k]) n++;
-  return n;
-}
-
-// ---- stats ----
 function getStats(algo, isLSB){
   var validPath = algo.path
     ? validatePath(algo.grid, algo.path, algo.start, algo.goal)
@@ -781,12 +742,12 @@ function getStats(algo, isLSB){
   };
 }
 
-// ---- recording ----
-function recordFrames(algo, isLSB, maxTicks){
+function recordFrames(algo, isLSB){
   var frames = [];
   var prevVisited = {};
   var prevFrontier = {};
   var prevDead = {};
+  var k;
 
   frames.push({
     addVisited: keysOf(algo.visited),
@@ -797,15 +758,22 @@ function recordFrames(algo, isLSB, maxTicks){
     parked: isLSB && algo.parked ? algo.parked.map(function(b){ return key(b.cell); }) : null,
     stats: getStats(algo, isLSB)
   });
-  var k;
   for(k in algo.visited) if(algo.visited[k]) prevVisited[k] = true;
   for(k in algo.frontier) if(algo.frontier[k]) prevFrontier[k] = true;
   if(algo.dead) for(k in algo.dead) if(algo.dead[k]) prevDead[k] = true;
 
   var tick = 0;
-  while(!algo.done && tick < maxTicks){
+  var recorded = 1;
+  var stride = RECORD_STRIDE;
+
+  while(!algo.done && recorded < MAX_FRAMES){
     algo.step(BUDGET_PER_TICK);
     tick++;
+
+    if(tick % stride !== 0){
+      // middle of stride: skip, but if algo just finished we still want a final frame
+      if(!algo.done) continue;
+    }
 
     var addVisited = [];
     for(k in algo.visited) if(algo.visited[k] && !prevVisited[k]){ addVisited.push(parseInt(k,10)); prevVisited[k] = true; }
@@ -827,23 +795,17 @@ function recordFrames(algo, isLSB, maxTicks){
       parked: isLSB && algo.parked ? algo.parked.map(function(b){ return key(b.cell); }) : null,
       stats: getStats(algo, isLSB)
     });
+    recorded++;
   }
   return frames;
-}
-
-function keysOf(obj){
-  var out = [];
-  for(var k in obj) if(obj[k]) out.push(parseInt(k,10));
-  return out;
 }
 
 function buildRecording(){
   var a = new AStar(grid, START, GOAL);
   var l = new LSB(grid, START, GOAL);
-  var framesA = recordFrames(a, false, RECORD_MAX_TICKS);
-  var framesL = recordFrames(l, true, RECORD_MAX_TICKS);
+  var framesA = recordFrames(a, false);
+  var framesL = recordFrames(l, true);
   var ticks = Math.max(framesA.length, framesL.length);
-
   var idleA = framesA[framesA.length-1];
   while(framesA.length < ticks){
     framesA.push({ addVisited:[], addFrontier:[], remFrontier:[], addDead:[],
@@ -857,7 +819,6 @@ function buildRecording(){
   return { framesA: framesA, framesL: framesL, ticks: ticks, grid: grid, START: START, GOAL: GOAL };
 }
 
-// ---- playback ----
 var recording = null;
 var playbackIdx = -1;
 var paused = false;
@@ -876,7 +837,6 @@ function applyFrame(state, frame){
   for(var k=0; k<frame.remFrontier.length; k++) delete state.frontier[frame.remFrontier[k]];
   for(var m=0; m<frame.addDead.length; m++) state.dead[frame.addDead[m]] = true;
 }
-
 function advanceToFrame(target){
   if(target <= playbackIdx) return;
   while(playbackIdx < target){
@@ -893,7 +853,6 @@ function advanceToFrame(target){
     currentL.stats = fl.stats;
   }
 }
-
 function resetPlayback(){
   playbackIdx = -1;
   tickAccumulator = 0;
@@ -904,13 +863,8 @@ function resetPlayback(){
   advanceToFrame(0);
 }
 
-// ---- rendering ----
 var cA = document.getElementById('cA');
 var cL = document.getElementById('cL');
-cA.width = W * CELL;
-cA.height = H * CELL;
-cL.width = W * CELL;
-cL.height = H * CELL;
 var ctxA = cA.getContext('2d');
 var ctxL = cL.getContext('2d');
 
@@ -960,7 +914,6 @@ function fmtStats(stats){
   s += '<br>alg time: <b>' + fmtTime(stats.algMs) + '</b>';
   return s;
 }
-
 function renderCurrent(){
   draw(ctxA, recording.grid, playbackA, currentA.path, currentA.parked);
   draw(ctxL, recording.grid, playbackL, currentL.path, currentL.parked);
@@ -968,18 +921,29 @@ function renderCurrent(){
   document.getElementById('sL').innerHTML = fmtStats(currentL.stats);
 }
 
-// ---- speed ----
 function setSpeed(s){
   PLAYBACK_SPEED = s;
   var btns = document.querySelectorAll('.speed-btn');
   for(var i=0; i<btns.length; i++){
     var v = parseFloat(btns[i].getAttribute('data-sp'));
-    if(Math.abs(v - s) < 1e-6) btns[i].className = 'speed-btn speed-on';
-    else btns[i].className = 'speed-btn';
+    btns[i].className = (Math.abs(v - s) < 1e-6) ? 'speed-btn speed-on' : 'speed-btn';
   }
 }
 
-// ---- driver ----
+function setSize(w, h){
+  W = w; H = h;
+  CELL = Math.max(2, Math.floor(600 / W));
+  cA.width = W * CELL; cA.height = H * CELL;
+  cL.width = W * CELL; cL.height = H * CELL;
+  var btns = document.querySelectorAll('.size-btn');
+  for(var i=0; i<btns.length; i++){
+    var bw = parseInt(btns[i].getAttribute('data-w'),10);
+    var bh = parseInt(btns[i].getAttribute('data-h'),10);
+    btns[i].className = (bw === W && bh === H) ? 'size-btn size-on' : 'size-btn';
+  }
+  setScenario('maze_any');
+}
+
 function setScenario(name){
   if(name === 'open'){        START = [0,0]; GOAL = [W-1,H-1]; grid = makeOpen(); }
   else if(name === 'sparse'){ START = [0,0]; GOAL = [W-1,H-1]; grid = makeSparse(); }
@@ -996,7 +960,6 @@ function setScenario(name){
   }
   buildAndPlay();
 }
-
 function restartSame(){ buildAndPlay(); }
 
 function buildAndPlay(){
@@ -1005,7 +968,6 @@ function buildAndPlay(){
   banner.textContent = 'Calculating...';
   document.getElementById('sA').innerHTML = '';
   document.getElementById('sL').innerHTML = '';
-
   setTimeout(function(){
     var t0 = performance.now();
     recording = buildRecording();
@@ -1013,11 +975,8 @@ function buildAndPlay(){
     banner.textContent = 'Computed in ' + fmtTime(computeMs) +
                          ' - playing back ' + recording.ticks + ' frames';
     setTimeout(function(){ banner.style.display = 'none'; }, 1500);
-
     resetPlayback();
-    paused = false;
-    finished = false;
-    lastFrameTime = 0;
+    paused = false; finished = false; lastFrameTime = 0;
     document.getElementById('pauseBtn').innerText = 'Pause';
     renderCurrent();
   }, 20);
@@ -1034,9 +993,7 @@ function loop(now){
   if(paused || finished || !recording) return;
   if(now - lastFrameTime < TICK_DELAY) return;
   lastFrameTime = now;
-
   var lastIdx = recording.ticks - 1;
-
   if(PLAYBACK_SPEED >= 9999){
     advanceToFrame(lastIdx);
     renderCurrent();
@@ -1044,12 +1001,10 @@ function loop(now){
     document.getElementById('pauseBtn').innerText = 'Done';
     return;
   }
-
   tickAccumulator += PLAYBACK_SPEED;
   var advanceBy = Math.floor(tickAccumulator);
   if(advanceBy <= 0){ renderCurrent(); return; }
   tickAccumulator -= advanceBy;
-
   var target = playbackIdx + advanceBy;
   if(target >= lastIdx){
     advanceToFrame(lastIdx);
@@ -1062,7 +1017,6 @@ function loop(now){
   renderCurrent();
 }
 
-// ---- mass test ----
 var MASS_N = 12;
 var MASS_MIN_TIME_MS = 5;
 var MASS_MAX_REPS = 30;
@@ -1076,19 +1030,10 @@ function runOneOnce(factory, isLSB){
     iters++;
   }
   var s = getStats(algo, isLSB);
-  return {
-    stats: s,
-    algMs: algo.algMs,
-    backtracks: s.backtracks,
-    parks: s.parks,
-    resumes: s.resumes,
-    kills: s.kills
-  };
+  return { stats: s, algMs: algo.algMs, backtracks: s.backtracks, parks: s.parks, resumes: s.resumes, kills: s.kills };
 }
-
 function runBench(factory, isLSB){
-  var totalMs = 0, reps = 0;
-  var last = null;
+  var totalMs = 0, reps = 0, last = null;
   while(reps < MASS_MAX_REPS){
     last = runOneOnce(factory, isLSB);
     totalMs += last.algMs;
@@ -1096,15 +1041,9 @@ function runBench(factory, isLSB){
     if(totalMs >= MASS_MIN_TIME_MS) break;
   }
   return {
-    stats: last.stats,
-    algMs: last.algMs,
-    backtracks: last.backtracks,
-    parks: last.parks,
-    resumes: last.resumes,
-    kills: last.kills,
-    avgMs: totalMs / reps,
-    reps: reps,
-    totalMs: totalMs
+    stats: last.stats, backtracks: last.backtracks, parks: last.parks,
+    resumes: last.resumes, kills: last.kills,
+    avgMs: totalMs / reps, reps: reps
   };
 }
 
@@ -1114,12 +1053,10 @@ function massTest(reuse){
   var out = document.getElementById('results');
   out.style.display = 'block';
   out.textContent = 'Running ' + MASS_N + ' mazes...';
-
   setTimeout(function(){
     var plans;
-    if(reuse && lastSeeds){
-      plans = lastSeeds.slice();
-    } else {
+    if(reuse && lastSeeds){ plans = lastSeeds.slice(); }
+    else {
       plans = [];
       for(var i=0; i<MASS_N; i++){
         var t = MAZE_TYPES[i % MAZE_TYPES.length];
@@ -1127,26 +1064,18 @@ function massTest(reuse){
       }
       lastSeeds = plans;
     }
-
     var rows = [];
-    var aSuccess = 0, lSuccess = 0;
-    var aWins = 0, lWins = 0, ties = 0;
-    var acc = { aTime:0, lTime:0, aExp:0, lExp:0, aPath:0, lPath:0,
-                lBT:0, lParks:0, lRes:0, lKills:0, n:0 };
-
+    var aSuccess = 0, lSuccess = 0, aWins = 0, lWins = 0, ties = 0;
+    var acc = { aTime:0, lTime:0, aExp:0, lExp:0, aPath:0, lPath:0, lBT:0, lParks:0, lRes:0, lKills:0, n:0 };
     for(var pi=0; pi<plans.length; pi++){
       var plan = plans[pi];
       var g = plan.fn(plan.seed);
       var S = [1,1], G = [W-3, H-3];
-
       var ra = runBench(function(){ return new AStar(g, S, G); }, false);
       var rl = runBench(function(){ return new LSB(g, S, G); }, true);
-
-      var aOk = ra.stats.success;
-      var lOk = rl.stats.success;
+      var aOk = ra.stats.success, lOk = rl.stats.success;
       if(aOk) aSuccess++;
       if(lOk) lSuccess++;
-
       var verdict;
       if(!aOk && !lOk) verdict = 'both FAIL';
       else if(!lOk) verdict = 'A* (LSB fail)';
@@ -1154,91 +1083,60 @@ function massTest(reuse){
       else if(ra.stats.expanded < rl.stats.expanded){ verdict = 'A*'; aWins++; }
       else if(rl.stats.expanded < ra.stats.expanded){ verdict = 'LSB'; lWins++; }
       else { verdict = 'tie'; ties++; }
-
       if(aOk && lOk){
-        acc.aTime += ra.avgMs;
-        acc.lTime += rl.avgMs;
-        acc.aExp += ra.stats.expanded;
-        acc.lExp += rl.stats.expanded;
-        acc.aPath += ra.stats.pathLen || 0;
-        acc.lPath += rl.stats.pathLen || 0;
-        acc.lBT += rl.backtracks || 0;
-        acc.lParks += rl.parks || 0;
-        acc.lRes += rl.resumes || 0;
-        acc.lKills += rl.kills || 0;
+        acc.aTime += ra.avgMs; acc.lTime += rl.avgMs;
+        acc.aExp += ra.stats.expanded; acc.lExp += rl.stats.expanded;
+        acc.aPath += ra.stats.pathLen || 0; acc.lPath += rl.stats.pathLen || 0;
+        acc.lBT += rl.backtracks || 0; acc.lParks += rl.parks || 0;
+        acc.lRes += rl.resumes || 0; acc.lKills += rl.kills || 0;
         acc.n++;
       }
-
       rows.push({
-        type: plan.type,
-        seed: plan.seed,
+        type: plan.type, seed: plan.seed,
         aTime: ra.avgMs, lTime: rl.avgMs,
         aReps: ra.reps, lReps: rl.reps,
         aExp: ra.stats.expanded, lExp: rl.stats.expanded,
         aPath: ra.stats.pathLen, lPath: rl.stats.pathLen,
-        aSuccess: aOk, lSuccess: lOk,
-        lReason: rl.stats.pathReason,
-        lBT: rl.backtracks, lParks: rl.parks,
-        lRes: rl.resumes, lKills: rl.kills,
+        aSuccess: aOk, lSuccess: lOk, lReason: rl.stats.pathReason,
+        lBT: rl.backtracks, lParks: rl.parks, lRes: rl.resumes, lKills: rl.kills,
         verdict: verdict
       });
     }
-
     function pad(s, n){ s = String(s); while(s.length < n) s += ' '; return s.slice(0, n); }
     function padL(s, n){ s = String(s); while(s.length < n) s = ' ' + s; return s.slice(-n); }
-
     var txt = '';
-    txt += 'MASS TEST - ' + MASS_N + ' mazes (' + W + 'x' + H + ')' +
-           (reuse ? '  [reused seeds]' : '  [fresh seeds]') + '\n';
+    txt += 'MASS TEST - ' + MASS_N + ' mazes (' + W + 'x' + H + ')' + (reuse ? '  [reused]' : '  [fresh]') + '\n';
     txt += 'Verdict by expanded-cells. Success requires validated path.\n\n';
     txt += pad('type', 9) + padL('seed', 12) + padL('A*t', 10) + padL('LSBt', 10)
-         + padL('A*exp', 8) + padL('LSBexp', 9)
-         + padL('A*pth', 7) + padL('LSBpth', 8)
-         + padL('ok', 4) + padL('rep', 7)
-         + padL('LSBbt', 8) + padL('park', 6) + padL('res', 5) + padL('kill', 6)
-         + '  verdict\n';
+         + padL('A*exp', 8) + padL('LSBexp', 9) + padL('A*pth', 7) + padL('LSBpth', 8)
+         + padL('ok', 4) + padL('rep', 7) + padL('LSBbt', 8) + padL('park', 6) + padL('res', 5) + padL('kill', 6) + '  verdict\n';
     txt += '------------------------------------------------------------------------------------\n';
     for(var ri=0; ri<rows.length; ri++){
       var r = rows[ri];
-      txt += pad(r.type, 9)
-          + padL(r.seed.toString(16), 12)
-          + padL(fmtTime(r.aTime), 10)
-          + padL(fmtTime(r.lTime), 10)
-          + padL(r.aExp, 8)
-          + padL(r.lExp, 9)
-          + padL(r.aPath === null ? '-' : r.aPath, 7)
-          + padL(r.lPath === null ? '-' : r.lPath, 8)
+      txt += pad(r.type, 9) + padL(r.seed.toString(16), 12)
+          + padL(fmtTime(r.aTime), 10) + padL(fmtTime(r.lTime), 10)
+          + padL(r.aExp, 8) + padL(r.lExp, 9)
+          + padL(r.aPath === null ? '-' : r.aPath, 7) + padL(r.lPath === null ? '-' : r.lPath, 8)
           + padL(r.aSuccess && r.lSuccess ? 'Y/Y' : (r.aSuccess ? 'Y/N' : 'N/N'), 4)
           + padL(r.aReps + '/' + r.lReps, 7)
-          + padL(r.lBT === null ? '-' : r.lBT, 8)
-          + padL(r.lParks === null ? '-' : r.lParks, 6)
-          + padL(r.lRes === null ? '-' : r.lRes, 5)
-          + padL(r.lKills === null ? '-' : r.lKills, 6)
+          + padL(r.lBT === null ? '-' : r.lBT, 8) + padL(r.lParks === null ? '-' : r.lParks, 6)
+          + padL(r.lRes === null ? '-' : r.lRes, 5) + padL(r.lKills === null ? '-' : r.lKills, 6)
           + '  ' + r.verdict + '\n';
-      if(!r.lSuccess && r.lReason && r.lReason !== 'no path'){
-        txt += '  LSB path invalid: ' + r.lReason + '\n';
-      }
+      if(!r.lSuccess && r.lReason && r.lReason !== 'no path') txt += '  LSB path invalid: ' + r.lReason + '\n';
     }
     txt += '------------------------------------------------------------------------------------\n';
     if(acc.n > 0){
       txt += pad('AVG', 9) + padL('', 12)
-          + padL(fmtTime(acc.aTime/acc.n), 10)
-          + padL(fmtTime(acc.lTime/acc.n), 10)
-          + padL(Math.round(acc.aExp/acc.n), 8)
-          + padL(Math.round(acc.lExp/acc.n), 9)
-          + padL(Math.round(acc.aPath/acc.n), 7)
-          + padL(Math.round(acc.lPath/acc.n), 8)
+          + padL(fmtTime(acc.aTime/acc.n), 10) + padL(fmtTime(acc.lTime/acc.n), 10)
+          + padL(Math.round(acc.aExp/acc.n), 8) + padL(Math.round(acc.lExp/acc.n), 9)
+          + padL(Math.round(acc.aPath/acc.n), 7) + padL(Math.round(acc.lPath/acc.n), 8)
           + padL('', 4) + padL('', 7)
-          + padL(Math.round(acc.lBT/acc.n), 8)
-          + padL(Math.round(acc.lParks/acc.n), 6)
-          + padL(Math.round(acc.lRes/acc.n), 5)
-          + padL(Math.round(acc.lKills/acc.n), 6)
+          + padL(Math.round(acc.lBT/acc.n), 8) + padL(Math.round(acc.lParks/acc.n), 6)
+          + padL(Math.round(acc.lRes/acc.n), 5) + padL(Math.round(acc.lKills/acc.n), 6)
           + '  (n=' + acc.n + ')\n';
     }
-    txt += '\nSUCCESS  A*: ' + aSuccess + '/' + MASS_N
-         + '   LSB: ' + lSuccess + '/' + MASS_N + '\n';
+    txt += '\nSUCCESS  A*: ' + aSuccess + '/' + MASS_N + '   LSB: ' + lSuccess + '/' + MASS_N + '\n';
     txt += 'WINS  A*: ' + aWins + '   LSB: ' + lWins + '   tie: ' + ties + '\n\n';
-
     txt += 'Per-type breakdown (both solved):\n';
     for(var mi=0; mi<MAZE_TYPES.length; mi++){
       var t2 = MAZE_TYPES[mi];
@@ -1246,29 +1144,22 @@ function massTest(reuse){
       for(var si=0; si<rows.length; si++){
         if(rows[si].type === t2.name && rows[si].aSuccess && rows[si].lSuccess) sub.push(rows[si]);
       }
-      if(sub.length === 0){
-        txt += '  ' + pad(t2.name, 9) + '  (none)\n';
-        continue;
-      }
+      if(sub.length === 0){ txt += '  ' + pad(t2.name, 9) + '  (none)\n'; continue; }
       var aAvgSum = 0, lAvgSum = 0, lBTSum = 0;
       for(var xi=0; xi<sub.length; xi++){
-        aAvgSum += sub[xi].aExp;
-        lAvgSum += sub[xi].lExp;
-        lBTSum += sub[xi].lBT || 0;
+        aAvgSum += sub[xi].aExp; lAvgSum += sub[xi].lExp; lBTSum += sub[xi].lBT || 0;
       }
       txt += '  ' + pad(t2.name, 9) + '  A* exp ' + padL(Math.round(aAvgSum/sub.length), 7)
            + '   LSB exp ' + padL(Math.round(lAvgSum/sub.length), 7)
            + '   LSB avg bt ' + padL(Math.round(lBTSum/sub.length), 7)
            + '   n=' + sub.length + '\n';
     }
-
     out.textContent = txt;
   }, 30);
 }
 
-// ---- start ----
 setSpeed(1);
-setScenario('maze_any');
+setSize(100, 50);
 requestAnimationFrame(loop);
 </script>
 </body>
