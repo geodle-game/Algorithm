@@ -370,6 +370,12 @@ AStar.prototype._recon = function(end){
 };
 
 // =============== LSB ===============
+// Only fix 3 applied:
+//   - no maxParksPerBranch (branches park indefinitely)
+//   - max_parked raised
+//   - actives refilled from parked whenever below minActive
+// Everything else (scoring, overflow kill scarring) is unchanged from the
+// dead-end-filter version.
 function Branch(cell, path, cameFrom){
   this.cell = cell;
   this.k = cell[1] * W + cell[0];
@@ -381,13 +387,11 @@ function Branch(cell, path, cameFrom){
     this.pathSet[c[1]*W + c[0]] = 1;
   }
   this.stack = [];
-  this.parkCount = 0;
   this.parked = false;
   this.scoreCache = 0;
 }
 Branch.prototype.clone = function(){
   var b = new Branch(this.cell, this.path, this.cameFrom);
-  b.parkCount = 0;
   b.scoreCache = this.scoreCache;
   for(var i=0; i<this.stack.length; i++){
     var s = this.stack[i];
@@ -405,13 +409,13 @@ function LSB(g, start, goal){
   this.grid = g; this.start = start; this.goal = goal;
   var scale = Math.max(1, Math.floor((W*H) / 3000));
   this.max_branches      = 16 * scale;
-  this.max_parked        = 32 * scale;
+  this.max_parked        = 200 * scale;   // FIX 3: raised from 32 * scale
   this.scar_threshold    = 2.5;
   this.scar_decay        = 0.004;
   this.tryEps            = 0.5;
-  this.maxParksPerBranch = 3;
   this.minActive         = 4 * scale;
   this.stallThreshold    = 200 * scale;
+  // FIX 3: maxParksPerBranch removed entirely
 
   var N = W * H;
   var dtg = new Float32Array(N);
@@ -480,10 +484,15 @@ LSB.prototype._shouldPark = function(b){
 LSB.prototype.step = function(budget){
   var t0 = performance.now();
   for(var i=0; i<budget && !this.done; i++){
+    // FIX 3: refill actives whenever below minActive, not only when empty
+    if(this.branches.length < this.minActive && this.parked.length > 0){
+      this._unpark(this.minActive - this.branches.length);
+    }
     if(this.branches.length === 0){
       if(this.parked.length === 0){ this.done = true; this.exhausted = true; break; }
       this._unpark(this.minActive);
     }
+
     this.tick++;
     var novelBefore = this._visitedCount;
     var oldBranches = this.branches;
@@ -504,6 +513,7 @@ LSB.prototype.step = function(budget){
     }
     this.branches = next;
 
+    // Overflow handling: unchanged (scar on kill, as before)
     for(var oi=0; oi<overflow.length; oi++){
       var ob = overflow[oi];
       if(this.parked.length < this.max_parked){
@@ -551,9 +561,6 @@ LSB.prototype.stepBranch = function(b, next){
   var grid = this.grid;
   var opts = [];
 
-  // Enumerate neighbors with pre-emptive dead-end detection.
-  // A neighbor is a "global dead end" if it has exactly one open neighbor total
-  // (or zero). That one open neighbor is us. Stepping in is pointless.
   for(var i=0; i<4; i++){
     var nx = x0 + N4[i][0];
     var ny = y0 + N4[i][1];
@@ -562,21 +569,15 @@ LSB.prototype.stepBranch = function(b, next){
     var kk = ny * W + nx;
     if(b.pathSet[kk]) continue;
 
-    // Goal is always a valid option, bypass dead-end filter
     if(kk === this.goalK){ opts.push([nx, ny, kk]); continue; }
-
-    // Already known dead — skip without re-scanning
     if(this.dead[kk]) continue;
 
-    // Count open neighbors of the candidate cell
     var openCount = 0;
     if(nx + 1 < W && grid[ny][nx + 1] === 0) openCount++;
     if(nx - 1 >= 0 && grid[ny][nx - 1] === 0) openCount++;
     if(ny + 1 < H && grid[ny + 1][nx] === 0) openCount++;
     if(ny - 1 >= 0 && grid[ny - 1][nx] === 0) openCount++;
 
-    // openCount <= 1 means: only open neighbor is us (the cell we'd step from).
-    // If it's 0, isolated. Either way, no future.
     if(openCount <= 1){
       this.scar[kk] += 1.0;
       this.scarKeys[kk] = 1;
@@ -588,7 +589,6 @@ LSB.prototype.stepBranch = function(b, next){
     opts.push([nx, ny, kk]);
   }
 
-  // No usable forward options → backtrack immediately, don't waste a step
   if(opts.length === 0){
     if(this.backtrack(b, next)) return;
     next.push(b);
@@ -650,8 +650,8 @@ LSB.prototype.stepBranch = function(b, next){
 
   if(b.k === this.goalK){ this.done = true; this.path = b.path; return; }
 
-  if(b.parkCount < this.maxParksPerBranch && this._shouldPark(b)){
-    b.parkCount++;
+  // FIX 3: no parkCount / maxParksPerBranch check anymore
+  if(this._shouldPark(b)){
     if(this.parked.length < this.max_parked){
       b.parked = true; this.parked.push(b); this.parks++;
       return;
@@ -668,8 +668,6 @@ LSB.prototype.backtrack = function(b, next){
       var nt = top.options[top.nextIdx];
       top.nextIdx++;
 
-      // Skip options that were global dead ends (defensive — they're already filtered
-      // at push time, but if a fork inherited stale options this catches them).
       if(this.dead[nt[2]] && nt[2] !== this.goalK) continue;
 
       for(var i = b.path.length - 1; i > top.pathIdx; i--){
@@ -749,7 +747,6 @@ function recordFrames(algo, isLSB){
   var recorded = 1;
   while(!algo.done && recorded < RECORD_MAX_FRAMES){
     algo.step(RECORD_BUDGET);
-
     var addVisited = [];
     forEachKey(algo.visited, function(k){ if(!prevVisited[k]){ addVisited.push(k); prevVisited[k] = 1; } });
     var addFrontier = [];
@@ -762,9 +759,7 @@ function recordFrames(algo, isLSB){
       forEachKey(algo.dead, function(k){ if(!prevDead[k]){ addDead.push(k); prevDead[k] = 1; } });
     }
     frames.push({
-      addVisited: addVisited,
-      addFrontier: addFrontier,
-      remFrontier: remFrontier,
+      addVisited: addVisited, addFrontier: addFrontier, remFrontier: remFrontier,
       addDead: addDead,
       path: algo.path ? algo.path.slice() : null,
       parked: isLSB && algo.parked ? algo.parked.map(function(b){ return b.k; }) : null,
@@ -877,7 +872,7 @@ function fmtStats(stats){
   if(stats.isLSB){
     s += 'bt: <b>' + stats.backtracks + '</b>  parks: <b>' + stats.parks + '</b>  res: <b>' + stats.resumes + '</b><br>';
     s += 'kills: <b>' + stats.kills + '</b>  parked: <b>' + stats.parkedCount + '</b><br>';
-    s += 'early dead-ends: <b>' + stats.earlyDeaths + '</b><br>';
+    s += 'early dead: <b>' + stats.earlyDeaths + '</b><br>';
   }
   s += 'done: <b>' + stats.done + '</b>';
   if(stats.exhausted) s += ' <span style="color:#f88">(exhausted)</span>';
@@ -1133,8 +1128,8 @@ function massTest(reuse){
       }
       txt += '  ' + pad(t2.name, 9) + '  A* exp ' + padL(Math.round(aAvgSum/sub.length), 7)
            + '   LSB exp ' + padL(Math.round(lAvgSum/sub.length), 7)
-           + '   LSB avg bt ' + padL(Math.round(lBTSum/sub.length), 7)
-           + '   LSB earlyDead ' + padL(Math.round(lEDSum/sub.length), 7)
+           + '   LSB bt ' + padL(Math.round(lBTSum/sub.length), 7)
+           + '   LSB eDead ' + padL(Math.round(lEDSum/sub.length), 7)
            + '   n=' + sub.length + '\n';
     }
     out.textContent = txt;
