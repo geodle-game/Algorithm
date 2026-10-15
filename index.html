@@ -31,12 +31,13 @@
   <button onclick="setScenario('r020')">Random 0.20</button>
   <button onclick="setScenario('r030')">Random 0.30</button>
   <button onclick="setScenario('r038')">Dense 0.38</button>
-  <button onclick="setScenario('maze1')">Perfect maze #1</button>
-  <button onclick="setScenario('maze2')">Perfect maze #2</button>
-  <button onclick="setScenario('maze3')">Perfect maze #3</button>
+  <button onclick="setScenario('maze_dfs')">Maze DFS (backtracker)</button>
+  <button onclick="setScenario('maze_prim')">Maze Prim</button>
+  <button onclick="setScenario('maze_kruskal')">Maze Kruskal</button>
+  <button onclick="setScenario('maze_any')">Maze (random type)</button>
   <button onclick="togglePause()" id="pauseBtn">Pause</button>
   <button onclick="restart()">Restart</button>
-  <button style="background:#333;border-color:#666" onclick="massTest()">▶ Mass test (10 mazes)</button>
+  <button style="background:#333;border-color:#666" onclick="massTest()">▶ Mass test (12 mazes)</button>
 </div>
 
 <div class="row">
@@ -73,11 +74,22 @@ let START = [0, 0];
 let GOAL  = [W-1, H-1];
 let TICK_DELAY = 20;
 let BUDGET_PER_TICK = 8;
+let lastMazeType = '—';
 
 // ---------- rng ----------
 function rng(seed){ let s=seed>>>0; return ()=>{ s=(s*1664525+1013904223)>>>0; return s/4294967296; }; }
 
-// ---------- maze gen ----------
+// ---------- fresh seeds ----------
+let seedCounter = 0;
+function freshSeed(){
+  seedCounter++;
+  // Mix wall-clock, Math.random, and a counter so consecutive calls never collide
+  const t = Date.now() >>> 0;
+  const r = Math.floor(Math.random() * 0xFFFFFFFF) >>> 0;
+  return ((t ^ r ^ (seedCounter * 2654435761)) >>> 0);
+}
+
+// ---------- random obstacle grids ----------
 function makeOpen(){ return Array.from({length:H},()=>Array(W).fill(0)); }
 function makeSparse(){
   const g = Array.from({length:H},()=>Array(W).fill(0));
@@ -94,15 +106,24 @@ function makeRandom(density, seed){
   g[0][0]=0; g[H-1][W-1]=0;
   return g;
 }
-function makePerfectMaze(seed){
+
+// ---------- maze generators ----------
+// Grid convention: odd/odd coords are "rooms", everything else is a wall.
+// All three algorithms produce a *perfect maze* (a spanning tree).
+// rx = number of rooms across, ry = number of rooms down.
+function roomDims(){
+  return [Math.floor((W-1)/2), Math.floor((H-1)/2)];
+}
+
+// Recursive backtracker — long winding corridors, few big dead ends
+function makeMazeDFS(seed){
   const r = rng(seed);
+  const [rx, ry] = roomDims();
   const g = Array.from({length:H},()=>Array(W).fill(1));
-  const rx = Math.floor((W-1)/2);
-  const ry = Math.floor((H-1)/2);
   const visited = Array.from({length:ry},()=>Array(rx).fill(false));
   const stack = [[0,0]];
-  visited[0][0]=true;
-  g[1][1]=0;
+  visited[0][0] = true;
+  g[1][1] = 0;
   while(stack.length){
     const [cx,cy] = stack[stack.length-1];
     const dirs = [[1,0],[-1,0],[0,1],[0,-1]];
@@ -122,6 +143,81 @@ function makePerfectMaze(seed){
     if(!moved) stack.pop();
   }
   return g;
+}
+
+// Prim's — bushy, many short dead ends
+function makeMazePrim(seed){
+  const r = rng(seed);
+  const [rx, ry] = roomDims();
+  const g = Array.from({length:H},()=>Array(W).fill(1));
+  const inMaze = Array.from({length:ry},()=>Array(rx).fill(false));
+  const frontier = [];
+  inMaze[0][0] = true;
+  g[1][1] = 0;
+  for(const [dx,dy] of [[1,0],[-1,0],[0,1],[0,-1]]){
+    const nx=dx, ny=dy;
+    if(nx>=0&&nx<rx&&ny>=0&&ny<ry) frontier.push([nx,ny,0,0]);
+  }
+  while(frontier.length){
+    const i = Math.floor(r()*frontier.length);
+    const [nx,ny,px,py] = frontier.splice(i,1)[0];
+    if(inMaze[ny][nx]) continue;
+    g[ny*2+1][nx*2+1] = 0;
+    g[py*2+1 + (ny-py)][px*2+1 + (nx-px)] = 0;
+    inMaze[ny][nx] = true;
+    for(const [dx,dy] of [[1,0],[-1,0],[0,1],[0,-1]]){
+      const ax=nx+dx, ay=ny+dy;
+      if(ax>=0&&ax<rx&&ay>=0&&ay<ry&&!inMaze[ay][ax]) frontier.push([ax,ay,nx,ny]);
+    }
+  }
+  return g;
+}
+
+// Kruskal's — uniform texture, lots of small passages
+function makeMazeKruskal(seed){
+  const r = rng(seed);
+  const [rx, ry] = roomDims();
+  const g = Array.from({length:H},()=>Array(W).fill(1));
+  // carve all rooms
+  for(let y=0;y<ry;y++) for(let x=0;x<rx;x++) g[y*2+1][x*2+1]=0;
+  // DSU
+  const parent = new Int32Array(rx*ry);
+  for(let i=0;i<rx*ry;i++) parent[i]=i;
+  function find(x){
+    while(parent[x]!==x){
+      parent[x] = parent[parent[x]];
+      x = parent[x];
+    }
+    return x;
+  }
+  // walls between rooms
+  const walls = [];
+  for(let y=0;y<ry;y++) for(let x=0;x<rx;x++){
+    if(x+1<rx) walls.push([x,y,x+1,y]);
+    if(y+1<ry) walls.push([x,y,x,y+1]);
+  }
+  for(let i=walls.length-1;i>0;i--){ const j=Math.floor(r()*(i+1)); [walls[i],walls[j]]=[walls[j],walls[i]]; }
+  for(const [x1,y1,x2,y2] of walls){
+    const ra = find(y1*rx+x1), rb = find(y2*rx+x2);
+    if(ra!==rb){
+      parent[ra] = rb;
+      const wx = x1*2+1 + (x2-x1);
+      const wy = y1*2+1 + (y2-y1);
+      g[wy][wx] = 0;
+    }
+  }
+  return g;
+}
+
+const MAZE_TYPES = [
+  { name:'DFS',     fn: makeMazeDFS },
+  { name:'Prim',    fn: makeMazePrim },
+  { name:'Kruskal', fn: makeMazeKruskal },
+];
+
+function makeMazeOfType(typeName, seed){
+  const t = MAZE_TYPES.find(t => t.name === typeName);
+  return t ? t.fn(seed) : makeMazeDFS(seed);
 }
 
 // ---------- helpers ----------
@@ -280,7 +376,6 @@ class LSB {
 
   step(budget){
     for(let i=0; i<budget && !this.done; i++){
-      // If no active branches, unpark the best ones
       if(this.branches.length === 0){
         if(this.parked.length === 0){ this.done = true; return; }
         this._unpark();
@@ -327,7 +422,6 @@ class LSB {
     }
   }
 
-  // returns true if branch was parked or killed (should NOT be added to next)
   _checkPark(b){
     if(b.stepsWithoutProgress < this.progressThreshold) return false;
     b.parkCount++;
@@ -349,9 +443,8 @@ class LSB {
     const opts = neighbors(this.grid, b.cell).filter(n => !b.pathSet.has(key(n)));
 
     if(opts.length === 0){
-      // no forward option → backtrack
       const dead = this.backtrack(b, next);
-      if(dead) return;              // truly exhausted, killed inside backtrack
+      if(dead) return;
       this._updateProgress(b, b.cell);
       if(this._checkPark(b)) return;
       next.push(b);
@@ -491,9 +584,10 @@ function stats(algo){
           `unique cells: <b>${algo.visited.size}</b><br>` +
           `path length: <b>${algo.path?algo.path.length:'—'}</b><br>` +
           `frontier: <b>${algo.frontier.size}</b><br>`;
-  if(algo.backtracks !== undefined) s += `backtracks: <b>${algo.backtracks}</b><br>`;
-  if(algo.parks !== undefined) s += `parks: <b>${algo.parks}</b>  resumes: <b>${algo.resumes}</b><br>` +
-                                    `kills: <b>${algo.kills}</b>  parked: <b>${algo.parked.length}</b><br>`;
+  if(algo.backtracks !== undefined)
+    s += `backtracks: <b>${algo.backtracks}</b><br>` +
+         `parks: <b>${algo.parks}</b>  resumes: <b>${algo.resumes}</b><br>` +
+         `kills: <b>${algo.kills}</b>  parked: <b>${algo.parked.length}</b><br>`;
   s += `done: <b>${algo.done}</b><br>`;
   s += `time: <b>${algo.elapsed !== null ? (algo.elapsed/1000).toFixed(2)+'s' : '…'}</b>`;
   return s;
@@ -503,14 +597,20 @@ function stats(algo){
 let grid, a, l, paused=false, t0=0, lastFrame=0, finished=false;
 
 function setScenario(name){
-  if(name==='open'){        START=[0,0]; GOAL=[W-1,H-1]; grid = makeOpen(); }
-  else if(name==='sparse'){ START=[0,0]; GOAL=[W-1,H-1]; grid = makeSparse(); }
-  else if(name==='r020'){   START=[0,0]; GOAL=[W-1,H-1]; grid = makeRandom(0.20, 1); }
-  else if(name==='r030'){   START=[0,0]; GOAL=[W-1,H-1]; grid = makeRandom(0.30, 2); }
-  else if(name==='r038'){   START=[0,0]; GOAL=[W-1,H-1]; grid = makeRandom(0.38, 3); }
-  else if(name==='maze1'){  grid = makePerfectMaze(1);  START=[1,1]; GOAL=[W-3,H-3]; }
-  else if(name==='maze2'){  grid = makePerfectMaze(7);  START=[1,1]; GOAL=[W-3,H-3]; }
-  else if(name==='maze3'){  grid = makePerfectMaze(42); START=[1,1]; GOAL=[W-3,H-3]; }
+  if(name==='open'){        START=[0,0]; GOAL=[W-1,H-1]; lastMazeType='—'; grid = makeOpen(); }
+  else if(name==='sparse'){ START=[0,0]; GOAL=[W-1,H-1]; lastMazeType='—'; grid = makeSparse(); }
+  else if(name==='r020'){   START=[0,0]; GOAL=[W-1,H-1]; lastMazeType='—'; grid = makeRandom(0.20, freshSeed()); }
+  else if(name==='r030'){   START=[0,0]; GOAL=[W-1,H-1]; lastMazeType='—'; grid = makeRandom(0.30, freshSeed()); }
+  else if(name==='r038'){   START=[0,0]; GOAL=[W-1,H-1]; lastMazeType='—'; grid = makeRandom(0.38, freshSeed()); }
+  else if(name==='maze_dfs'){     lastMazeType='DFS';     grid = makeMazeDFS(freshSeed());     START=[1,1]; GOAL=[W-3,H-3]; }
+  else if(name==='maze_prim'){    lastMazeType='Prim';    grid = makeMazePrim(freshSeed());    START=[1,1]; GOAL=[W-3,H-3]; }
+  else if(name==='maze_kruskal'){ lastMazeType='Kruskal'; grid = makeMazeKruskal(freshSeed()); START=[1,1]; GOAL=[W-3,H-3]; }
+  else if(name==='maze_any'){
+    const t = MAZE_TYPES[Math.floor(Math.random()*MAZE_TYPES.length)];
+    lastMazeType = t.name;
+    grid = t.fn(freshSeed());
+    START=[1,1]; GOAL=[W-3,H-3];
+  }
   restart();
 }
 
@@ -557,7 +657,7 @@ function loop(now){
 }
 
 // ---------- mass test ----------
-const MASS_N = 10;
+const MASS_N = 12;              // 12 mazes = 4 of each type
 const MASS_MAX_ITERS = 20000;
 
 function runOne(algo){
@@ -586,7 +686,7 @@ function massTest(){
   document.getElementById('pauseBtn').innerText = 'Resume';
   const out = document.getElementById('results');
   out.style.display = 'block';
-  out.textContent = 'Running ' + MASS_N + ' perfect mazes...';
+  out.textContent = 'Running ' + MASS_N + ' fresh mazes...';
 
   setTimeout(() => {
     const rows = [];
@@ -595,8 +695,11 @@ function massTest(){
     let sumAPath=0, sumLPath=0, sumLBT=0, sumLParks=0, sumLRes=0, sumLKills=0;
     let aDNF=0, lDNF=0;
 
-    for(let i=1; i<=MASS_N; i++){
-      const g = makePerfectMaze(i * 1013);
+    // Cycle through DFS, Prim, Kruskal so we get 4 of each
+    for(let i=0; i<MASS_N; i++){
+      const type = MAZE_TYPES[i % MAZE_TYPES.length];
+      const seed = freshSeed();
+      const g = type.fn(seed);
       const S = [1,1], G = [W-3,H-3];
       const ra = runOne(new AStar(g, S, G));
       const rl = runOne(new LSB(g, S, G));
@@ -619,10 +722,12 @@ function massTest(){
       else if(ra.unique < rl.unique){ verdict = 'A*';  aWins++; }
       else { verdict = 'tie'; ties++; }
 
-      rows.push({ seed:i*1013, aTime:ra.ms, lTime:rl.ms,
+      rows.push({ type: type.name, seed,
+                  aTime:ra.ms, lTime:rl.ms,
                   aUniq:ra.unique, lUniq:rl.unique,
                   aPath:ra.pathLen, lPath:rl.pathLen,
-                  lBT:rl.backtracks, lParks:rl.parks, lRes:rl.resumes, lKills:rl.kills,
+                  lBT:rl.backtracks, lParks:rl.parks,
+                  lRes:rl.resumes, lKills:rl.kills,
                   aDone:ra.done, lDone:rl.done, verdict });
     }
 
@@ -630,16 +735,16 @@ function massTest(){
     const padL= (s,n)=>{ s=String(s); while(s.length<n) s=' '+s; return s.slice(-n); };
 
     let txt = '';
-    txt += 'MASS TEST — ' + MASS_N + ' perfect mazes (' + W + 'x' + H + ')\n';
-    txt += 'Winner by unique-cells-touched (lower is better).\n\n';
-    txt += pad('seed',7) + padL('A*ms',8) + padL('LSBms',8)
+    txt += 'MASS TEST — ' + MASS_N + ' fresh mazes (' + W + 'x' + H + ')\n';
+    txt += 'All seeds randomised per-run. Verdict by unique-cells-touched.\n\n';
+    txt += pad('type',9) + padL('A*ms',8) + padL('LSBms',8)
          + padL('A*uniq',8) + padL('LSBuniq',9)
          + padL('A*path',8) + padL('LSBpath',9)
          + padL('LSBbt',7) + padL('park',6) + padL('res',5) + padL('kill',6)
          + '  verdict\n';
-    txt += '─'.repeat(7+8+8+8+9+8+9+7+6+5+6+10) + '\n';
+    txt += '─'.repeat(9+8+8+8+9+8+9+7+6+5+6+10) + '\n';
     for(const r of rows){
-      txt += pad(r.seed, 7)
+      txt += pad(r.type, 9)
           + padL(r.aTime.toFixed(1), 8)
           + padL(r.lTime.toFixed(1), 8)
           + padL(r.aDone ? r.aUniq : 'DNF', 8)
@@ -652,8 +757,8 @@ function massTest(){
           + padL(r.lKills ?? '—', 6)
           + '  ' + r.verdict + '\n';
     }
-    txt += '─'.repeat(7+8+8+8+9+8+9+7+6+5+6+10) + '\n';
-    txt += pad('AVG', 7)
+    txt += '─'.repeat(9+8+8+8+9+8+9+7+6+5+6+10) + '\n';
+    txt += pad('AVG', 9)
         + padL((sumATime/MASS_N).toFixed(1), 8)
         + padL((sumLTime/MASS_N).toFixed(1), 8)
         + padL((sumAUniq/MASS_N).toFixed(0), 8)
@@ -667,17 +772,21 @@ function massTest(){
         + '\n\n';
     txt += 'WINS  A*: ' + aWins + '   LSB: ' + lWins + '   tie: ' + ties + '\n';
     txt += 'DNF   A*: ' + aDNF + '   LSB: ' + lDNF + '\n\n';
-    txt += 'Totals:\n';
-    txt += '  A*  unique: ' + sumAUniq + '   time: ' + sumATime.toFixed(0) + ' ms\n';
-    txt += '  LSB unique: ' + sumLUniq + '   time: ' + sumLTime.toFixed(0) + ' ms\n';
-    txt += '  LSB backtracks: ' + sumLBT + '   parks: ' + sumLParks
-         + '   resumes: ' + sumLRes + '   kills: ' + sumLKills + '\n';
+    txt += 'Per-type breakdown (unique cells, avg):\n';
+    for(const t of MAZE_TYPES){
+      const sub = rows.filter(r => r.type === t.name);
+      const aAvg = (sub.reduce((s,r)=>s+r.aUniq,0) / sub.length).toFixed(0);
+      const lAvg = (sub.reduce((s,r)=>s+r.lUniq,0) / sub.length).toFixed(0);
+      const lBT  = (sub.reduce((s,r)=>s+(r.lBT||0),0) / sub.length).toFixed(0);
+      txt += '  ' + pad(t.name, 9) + '  A* ' + padL(aAvg, 6) + '   LSB ' + padL(lAvg, 6)
+           + '   LSB avg backtracks ' + padL(lBT, 6) + '\n';
+    }
 
     out.textContent = txt;
   }, 30);
 }
 
-setScenario('maze1');
+setScenario('maze_any');
 requestAnimationFrame(loop);
 </script>
 </body>
