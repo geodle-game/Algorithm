@@ -13,6 +13,7 @@
   .panel { background:#181818; padding:8px; border-radius:6px; }
   .stats { font-size:12px; line-height:1.5; color:#bbb; }
   .stats b { color:#fff; }
+  .stats .primary { color:#fff; font-size:14px; margin-bottom:4px; }
   button { background:#2a2a2a; color:#eee; border:1px solid #444; padding:8px 12px;
            border-radius:5px; font-family:monospace; font-size:13px; margin:3px; }
   button:active { background:#444; }
@@ -21,9 +22,13 @@
   pre#results { background:#0a0a0a; padding:10px; border-radius:6px; font-size:11px;
                 line-height:1.4; overflow-x:auto; color:#ddd; margin-top:10px;
                 border:1px solid #333; white-space:pre; }
+  .banner { background:#222; padding:6px 10px; border-radius:4px; font-size:12px;
+            color:#ff0; margin-bottom:6px; display:none; }
 </style>
 </head>
 <body>
+
+<div class="banner" id="banner">Calculating…</div>
 
 <div class="panel" style="margin-bottom:8px;">
   <button onclick="setScenario('open')">Open</button>
@@ -31,13 +36,13 @@
   <button onclick="setScenario('r020')">Random 0.20</button>
   <button onclick="setScenario('r030')">Random 0.30</button>
   <button onclick="setScenario('r038')">Dense 0.38</button>
-  <button onclick="setScenario('maze_dfs')">Maze DFS (backtracker)</button>
+  <button onclick="setScenario('maze_dfs')">Maze DFS</button>
   <button onclick="setScenario('maze_prim')">Maze Prim</button>
   <button onclick="setScenario('maze_kruskal')">Maze Kruskal</button>
-  <button onclick="setScenario('maze_any')">Maze (random type)</button>
+  <button onclick="setScenario('maze_any')">Maze (random)</button>
   <button onclick="togglePause()" id="pauseBtn">Pause</button>
-  <button onclick="restart()">Restart</button>
-  <button style="background:#333;border-color:#666" onclick="massTest()">▶ Mass test (12 mazes)</button>
+  <button onclick="restartSame()">Replay</button>
+  <button style="background:#333;border-color:#666" onclick="massTest()">▶ Mass test (12)</button>
 </div>
 
 <div class="row">
@@ -70,26 +75,26 @@
 // ---------- config ----------
 const W = 60, H = 30;
 const CELL = Math.floor(480 / W);
+const TICK_DELAY = 16;          // ms per playback frame
+const PLAYBACK_SPEED = 3;       // recording ticks per playback frame
+const BUDGET_PER_TICK = 8;      // steps per recorded tick
+const RECORD_MAX_TICKS = 4000;  // safety cap
+
 let START = [0, 0];
 let GOAL  = [W-1, H-1];
-let TICK_DELAY = 20;
-let BUDGET_PER_TICK = 8;
-let lastMazeType = '—';
+let lastScenarioName = 'maze_any';
 
 // ---------- rng ----------
 function rng(seed){ let s=seed>>>0; return ()=>{ s=(s*1664525+1013904223)>>>0; return s/4294967296; }; }
-
-// ---------- fresh seeds ----------
 let seedCounter = 0;
 function freshSeed(){
   seedCounter++;
-  // Mix wall-clock, Math.random, and a counter so consecutive calls never collide
   const t = Date.now() >>> 0;
   const r = Math.floor(Math.random() * 0xFFFFFFFF) >>> 0;
   return ((t ^ r ^ (seedCounter * 2654435761)) >>> 0);
 }
 
-// ---------- random obstacle grids ----------
+// ---------- grid generators ----------
 function makeOpen(){ return Array.from({length:H},()=>Array(W).fill(0)); }
 function makeSparse(){
   const g = Array.from({length:H},()=>Array(W).fill(0));
@@ -106,16 +111,8 @@ function makeRandom(density, seed){
   g[0][0]=0; g[H-1][W-1]=0;
   return g;
 }
+function roomDims(){ return [Math.floor((W-1)/2), Math.floor((H-1)/2)]; }
 
-// ---------- maze generators ----------
-// Grid convention: odd/odd coords are "rooms", everything else is a wall.
-// All three algorithms produce a *perfect maze* (a spanning tree).
-// rx = number of rooms across, ry = number of rooms down.
-function roomDims(){
-  return [Math.floor((W-1)/2), Math.floor((H-1)/2)];
-}
-
-// Recursive backtracker — long winding corridors, few big dead ends
 function makeMazeDFS(seed){
   const r = rng(seed);
   const [rx, ry] = roomDims();
@@ -144,8 +141,6 @@ function makeMazeDFS(seed){
   }
   return g;
 }
-
-// Prim's — bushy, many short dead ends
 function makeMazePrim(seed){
   const r = rng(seed);
   const [rx, ry] = roomDims();
@@ -172,25 +167,17 @@ function makeMazePrim(seed){
   }
   return g;
 }
-
-// Kruskal's — uniform texture, lots of small passages
 function makeMazeKruskal(seed){
   const r = rng(seed);
   const [rx, ry] = roomDims();
   const g = Array.from({length:H},()=>Array(W).fill(1));
-  // carve all rooms
   for(let y=0;y<ry;y++) for(let x=0;x<rx;x++) g[y*2+1][x*2+1]=0;
-  // DSU
   const parent = new Int32Array(rx*ry);
   for(let i=0;i<rx*ry;i++) parent[i]=i;
   function find(x){
-    while(parent[x]!==x){
-      parent[x] = parent[parent[x]];
-      x = parent[x];
-    }
+    while(parent[x]!==x){ parent[x]=parent[parent[x]]; x=parent[x]; }
     return x;
   }
-  // walls between rooms
   const walls = [];
   for(let y=0;y<ry;y++) for(let x=0;x<rx;x++){
     if(x+1<rx) walls.push([x,y,x+1,y]);
@@ -201,24 +188,16 @@ function makeMazeKruskal(seed){
     const ra = find(y1*rx+x1), rb = find(y2*rx+x2);
     if(ra!==rb){
       parent[ra] = rb;
-      const wx = x1*2+1 + (x2-x1);
-      const wy = y1*2+1 + (y2-y1);
-      g[wy][wx] = 0;
+      g[y1*2+1 + (y2-y1)][x1*2+1 + (x2-x1)] = 0;
     }
   }
   return g;
 }
-
 const MAZE_TYPES = [
   { name:'DFS',     fn: makeMazeDFS },
   { name:'Prim',    fn: makeMazePrim },
   { name:'Kruskal', fn: makeMazeKruskal },
 ];
-
-function makeMazeOfType(typeName, seed){
-  const t = MAZE_TYPES.find(t => t.name === typeName);
-  return t ? t.fn(seed) : makeMazeDFS(seed);
-}
 
 // ---------- helpers ----------
 function manhattan(a,b){ return Math.abs(a[0]-b[0])+Math.abs(a[1]-b[1]); }
@@ -245,15 +224,7 @@ class MinHeap {
     return top;
   }
   get size(){ return this.h.length; }
-  _up(i){
-    const h=this.h;
-    while(i>0){
-      const p=(i-1)>>1;
-      if(h[p][0]<=h[i][0]) break;
-      [h[p],h[i]]=[h[i],h[p]];
-      i=p;
-    }
-  }
+  _up(i){ const h=this.h; while(i>0){ const p=(i-1)>>1; if(h[p][0]<=h[i][0]) break; [h[p],h[i]]=[h[i],h[p]]; i=p; } }
   _down(i){
     const h=this.h, n=h.length;
     while(true){
@@ -271,7 +242,6 @@ class MinHeap {
 class AStar {
   constructor(grid, start, goal){
     this.grid=grid; this.start=start; this.goal=goal;
-    this.name="A*";
     this.open = new MinHeap();
     this.open.push([manhattan(start,goal), 0, start]);
     this.g = new Map(); this.g.set(key(start), 0);
@@ -279,12 +249,14 @@ class AStar {
     this.closed = new Set();
     this.visited = new Set([key(start)]);
     this.frontier = new Set([key(start)]);
-    this.done=false; this.path=null; this.expanded=0; this.elapsed=null;
+    this.done=false; this.path=null; this.expanded=0;
+    this.algMs = 0;
   }
   step(budget){
+    const t0 = performance.now();
     let spent = 0;
     while(spent < budget && !this.done){
-      if(this.open.size === 0){ this.done=true; return; }
+      if(this.open.size === 0){ this.done=true; break; }
       const [,g,c] = this.open.pop();
       const kc = key(c);
       if(this.closed.has(kc)) continue;
@@ -294,7 +266,7 @@ class AStar {
       this.expanded++;
       spent++;
       if(c[0]===this.goal[0] && c[1]===this.goal[1]){
-        this.done=true; this._recon(c); return;
+        this.done=true; this._recon(c); break;
       }
       for(const n of neighbors(this.grid,c)){
         const ng = g+1;
@@ -309,6 +281,7 @@ class AStar {
         }
       }
     }
+    this.algMs += performance.now() - t0;
   }
   _recon(end){
     const p=[]; let c=end;
@@ -349,47 +322,44 @@ class Branch {
 class LSB {
   constructor(grid, start, goal, opts={}){
     this.grid=grid; this.start=start; this.goal=goal;
-    this.name="LSB";
-    this.max_branches        = opts.max_branches        ?? 16;
-    this.scar_threshold      = opts.scar_threshold      ?? 2.5;
-    this.scar_decay          = opts.scar_decay          ?? 0.004;
-    this.tryEps              = opts.tryEps              ?? 0.5;
-    this.progressThreshold   = opts.progressThreshold   ?? 100;
-    this.maxParksPerBranch   = opts.maxParksPerBranch   ?? 3;
-    this.minActive           = opts.minActive           ?? 4;
-
+    this.max_branches      = opts.max_branches      ?? 16;
+    this.scar_threshold    = opts.scar_threshold    ?? 2.5;
+    this.scar_decay        = opts.scar_decay        ?? 0.004;
+    this.tryEps            = opts.tryEps            ?? 0.5;
+    this.progressThreshold = opts.progressThreshold ?? 100;
+    this.maxParksPerBranch = opts.maxParksPerBranch ?? 3;
+    this.minActive         = opts.minActive         ?? 4;
     this.scar = new Map();
     const b = new Branch(start, [start], null);
     b.best = manhattan(start, goal);
     this.branches = [b];
     this.parked = [];
     this.done=false; this.path=null; this.expanded=0; this.tick=0;
-    this.backtracks=0;
-    this.parks=0; this.resumes=0; this.kills=0;
-    this.elapsed=null;
+    this.backtracks=0; this.parks=0; this.resumes=0; this.kills=0;
+    this.algMs = 0;
     this.visited = new Set([key(start)]);
     this.frontier = new Set([key(start)]);
     this.dead = new Set();
   }
   _scarAdd(c, amt){ this.scar.set(key(c), (this.scar.get(key(c))||0)+amt); }
-  _scarGet(c){ return this.scar.get(key(c))||0; }
 
   step(budget){
+    const t0 = performance.now();
+    outer:
     for(let i=0; i<budget && !this.done; i++){
       if(this.branches.length === 0){
-        if(this.parked.length === 0){ this.done = true; return; }
+        if(this.parked.length === 0){ this.done = true; break; }
         this._unpark();
       }
       this.tick++;
       const next = [];
       for(const b of this.branches){
         this.stepBranch(b, next);
-        if(this.done) return;
+        if(this.done) break outer;
       }
       next.sort((a,b) => a.best - b.best);
       this.branches = next.slice(0, this.max_branches);
       this.frontier = new Set(this.branches.map(b => key(b.cell)));
-
       if(this.scar_decay>0 && this.tick%60===0){
         for(const k of Array.from(this.scar.keys())){
           const v = this.scar.get(k)*(1-this.scar_decay);
@@ -397,8 +367,8 @@ class LSB {
         }
       }
     }
+    this.algMs += performance.now() - t0;
   }
-
   _unpark(){
     this.parked.sort((a,b) => a.best - b.best);
     const n = Math.min(this.minActive, this.parked.length);
@@ -410,18 +380,13 @@ class LSB {
       this.resumes++;
     }
   }
-
   _updateProgress(b, stepCell){
     const k = key(stepCell);
     const isNew = !this.visited.has(k);
     this.visited.add(k);
-    if(isNew){
-      b.stepsWithoutProgress = 0;
-    } else {
-      b.stepsWithoutProgress++;
-    }
+    if(isNew) b.stepsWithoutProgress = 0;
+    else b.stepsWithoutProgress++;
   }
-
   _checkPark(b){
     if(b.stepsWithoutProgress < this.progressThreshold) return false;
     b.parkCount++;
@@ -435,13 +400,11 @@ class LSB {
     this.parks++;
     return true;
   }
-
   stepBranch(b, next){
     if(b.cell[0]===this.goal[0] && b.cell[1]===this.goal[1]){
       this.done=true; this.path=b.path; return;
     }
     const opts = neighbors(this.grid, b.cell).filter(n => !b.pathSet.has(key(n)));
-
     if(opts.length === 0){
       const dead = this.backtrack(b, next);
       if(dead) return;
@@ -450,10 +413,8 @@ class LSB {
       next.push(b);
       return;
     }
-
     opts.sort((p,q) => euclid(p, this.goal) - euclid(q, this.goal));
     const primary = opts[0];
-
     if(opts.length > 1){
       const bestD = euclid(primary, this.goal);
       const tied = opts.filter(o => Math.abs(euclid(o, this.goal) - bestD) < this.tryEps);
@@ -462,12 +423,7 @@ class LSB {
           if(next.length + this.branches.length >= this.max_branches) break;
           const nb = b.clone();
           const nt = tied[i];
-          nb.stack.push({
-            cell: b.cell,
-            options: opts.slice(),
-            nextIdx: tied.length,
-            pathIdx: b.path.length - 1
-          });
+          nb.stack.push({ cell: b.cell, options: opts.slice(), nextIdx: tied.length, pathIdx: b.path.length - 1 });
           nb.path.push(nt);
           nb.pathSet.add(key(nt));
           nb.cameFrom = b.cell;
@@ -477,22 +433,11 @@ class LSB {
           this.expanded++;
           next.push(nb);
         }
-        b.stack.push({
-          cell: b.cell,
-          options: opts.slice(),
-          nextIdx: tied.length,
-          pathIdx: b.path.length - 1
-        });
+        b.stack.push({ cell: b.cell, options: opts.slice(), nextIdx: tied.length, pathIdx: b.path.length - 1 });
       } else {
-        b.stack.push({
-          cell: b.cell,
-          options: opts.slice(),
-          nextIdx: 1,
-          pathIdx: b.path.length - 1
-        });
+        b.stack.push({ cell: b.cell, options: opts.slice(), nextIdx: 1, pathIdx: b.path.length - 1 });
       }
     }
-
     b.path.push(primary);
     b.pathSet.add(key(primary));
     b.cameFrom = b.cell;
@@ -500,16 +445,13 @@ class LSB {
     this.expanded++;
     const d = manhattan(primary, this.goal);
     if(d < b.best) b.best = d;
-
     if(primary[0]===this.goal[0] && primary[1]===this.goal[1]){
       this.done=true; this.path=b.path; return;
     }
-
     this._updateProgress(b, primary);
     if(this._checkPark(b)) return;
     next.push(b);
   }
-
   backtrack(b, next){
     this.backtracks++;
     while(b.stack.length > 0){
@@ -535,13 +477,139 @@ class LSB {
       }
       b.stack.pop();
     }
-    for(const c of b.path){
-      this._scarAdd(c, 0.5);
-      this.dead.add(key(c));
-    }
+    for(const c of b.path){ this._scarAdd(c, 0.5); this.dead.add(key(c)); }
     this.kills++;
     return true;
   }
+}
+
+// ---------- getStats ----------
+function getStats(algo){
+  return {
+    expanded: algo.expanded,
+    unique: algo.visited.size,
+    pathLen: algo.path ? algo.path.length : null,
+    frontier: algo.frontier.size,
+    backtracks: algo.backtracks,
+    parks: algo.parks,
+    resumes: algo.resumes,
+    kills: algo.kills,
+    parkedCount: algo.parked ? algo.parked.length : null,
+    done: algo.done,
+    algMs: algo.algMs,
+    isLSB: algo.backtracks !== undefined
+  };
+}
+
+// ---------- recording ----------
+// Record per-tick deltas. Frame 0 = initial state. Frame i = state after i-th step.
+function recordFrames(algo, maxTicks){
+  const frames = [];
+  const prevVisited  = new Set();
+  const prevFrontier = new Set();
+  const prevDead     = new Set();
+
+  // Frame 0: initial state as pure additions
+  frames.push({
+    addVisited: Array.from(algo.visited),
+    addFrontier: Array.from(algo.frontier),
+    remFrontier: [],
+    addDead: algo.dead ? Array.from(algo.dead) : [],
+    path: algo.path ? algo.path.slice() : null,
+    parked: algo.parked ? algo.parked.map(b => key(b.cell)) : null,
+    stats: getStats(algo)
+  });
+  for(const k of algo.visited) prevVisited.add(k);
+  for(const k of algo.frontier) prevFrontier.add(k);
+  if(algo.dead) for(const k of algo.dead) prevDead.add(k);
+
+  let tick = 0;
+  while(!algo.done && tick < maxTicks){
+    algo.step(BUDGET_PER_TICK);
+    tick++;
+
+    const addVisited = [];
+    for(const k of algo.visited) if(!prevVisited.has(k)){ addVisited.push(k); prevVisited.add(k); }
+    const addFrontier = [];
+    for(const k of algo.frontier) if(!prevFrontier.has(k)){ addFrontier.push(k); prevFrontier.add(k); }
+    const remFrontier = [];
+    for(const k of prevFrontier) if(!algo.frontier.has(k)) remFrontier.push(k);
+    for(const k of remFrontier) prevFrontier.delete(k);
+    const addDead = [];
+    if(algo.dead){
+      for(const k of algo.dead) if(!prevDead.has(k)){ addDead.push(k); prevDead.add(k); }
+    }
+    frames.push({
+      addVisited, addFrontier, remFrontier, addDead,
+      path: algo.path ? algo.path.slice() : null,
+      parked: algo.parked ? algo.parked.map(b => key(b.cell)) : null,
+      stats: getStats(algo)
+    });
+  }
+  return frames;
+}
+
+function buildRecording(){
+  const a = new AStar(grid, START, GOAL);
+  const l = new LSB(grid, START, GOAL);
+  const framesA = recordFrames(a, RECORD_MAX_TICKS);
+  const framesL = recordFrames(l, RECORD_MAX_TICKS);
+  const ticks = Math.max(framesA.length, framesL.length);
+  // pad shorter one with idle frames (same visual state)
+  const idleA = framesA[framesA.length-1];
+  while(framesA.length < ticks)
+    framesA.push({ addVisited:[], addFrontier:[], remFrontier:[], addDead:[],
+                   path: idleA.path, parked: idleA.parked, stats: idleA.stats });
+  const idleL = framesL[framesL.length-1];
+  while(framesL.length < ticks)
+    framesL.push({ addVisited:[], addFrontier:[], remFrontier:[], addDead:[],
+                   path: idleL.path, parked: idleL.parked, stats: idleL.stats });
+  return { framesA, framesL, ticks, grid, START, GOAL };
+}
+
+// ---------- playback ----------
+let recording = null;
+let playbackIdx = -1;
+let paused = false;
+let finished = false;
+let lastFrameTime = 0;
+
+const playbackA = { visited: new Set(), frontier: new Set(), dead: new Set() };
+const playbackL = { visited: new Set(), frontier: new Set(), dead: new Set() };
+let currentA = { path: null, parked: null, stats: null };
+let currentL = { path: null, parked: null, stats: null };
+
+function applyFrame(state, frame){
+  for(const k of frame.addVisited) state.visited.add(k);
+  for(const k of frame.addFrontier) state.frontier.add(k);
+  for(const k of frame.remFrontier) state.frontier.delete(k);
+  for(const k of frame.addDead) state.dead.add(k);
+}
+
+function advanceToFrame(target){
+  if(target <= playbackIdx) return;
+  while(playbackIdx < target){
+    playbackIdx++;
+    const fa = recording.framesA[playbackIdx];
+    const fl = recording.framesL[playbackIdx];
+    applyFrame(playbackA, fa);
+    applyFrame(playbackL, fl);
+    currentA.path = fa.path;
+    currentA.parked = fa.parked;
+    currentA.stats = fa.stats;
+    currentL.path = fl.path;
+    currentL.parked = fl.parked;
+    currentL.stats = fl.stats;
+  }
+}
+
+function resetPlayback(){
+  playbackIdx = -1;
+  playbackA.visited.clear(); playbackA.frontier.clear(); playbackA.dead.clear();
+  playbackL.visited.clear(); playbackL.frontier.clear(); playbackL.dead.clear();
+  currentA = { path: null, parked: null, stats: null };
+  currentL = { path: null, parked: null, stats: null };
+  advanceToFrame(0);
 }
 
 // ---------- rendering ----------
@@ -557,20 +625,20 @@ const COLOR = {
   frontier:'#ff0', parked:'#f80', visited:'#2a4a7a', path:'#0ff', dead:'#a00'
 };
 
-function draw(ctx, grid, algo){
+function draw(ctx, grid, view, path, parked){
   ctx.fillStyle = COLOR.open;
   ctx.fillRect(0,0,ctx.canvas.width,ctx.canvas.height);
-  const pathSet = algo.path ? new Set(algo.path.map(key)) : null;
-  const parkedSet = algo.parked ? new Set(algo.parked.map(b => key(b.cell))) : null;
+  const pathSet = path ? new Set(path.map(key)) : null;
+  const parkedSet = parked ? new Set(parked) : null;
   for(let y=0;y<H;y++){
     for(let x=0;x<W;x++){
       const k = y*W+x;
       let col = null;
       if(grid[y][x]===1) col = COLOR.wall;
-      else if(algo.dead && algo.dead.has(k)) col = COLOR.dead;
-      else if(algo.visited.has(k)) col = COLOR.visited;
+      else if(view.dead.has(k)) col = COLOR.dead;
+      else if(view.visited.has(k)) col = COLOR.visited;
       if(parkedSet && parkedSet.has(k)) col = COLOR.parked;
-      if(algo.frontier.has(k)) col = COLOR.frontier;
+      if(view.frontier.has(k)) col = COLOR.frontier;
       if(pathSet && pathSet.has(k)) col = COLOR.path;
       if(x===START[0]&&y===START[1]) col = COLOR.start;
       if(x===GOAL[0]&&y===GOAL[1]) col = COLOR.goal;
@@ -579,51 +647,75 @@ function draw(ctx, grid, algo){
   }
 }
 
-function stats(algo){
-  let s = `expanded: <b>${algo.expanded}</b><br>` +
-          `unique cells: <b>${algo.visited.size}</b><br>` +
-          `path length: <b>${algo.path?algo.path.length:'—'}</b><br>` +
-          `frontier: <b>${algo.frontier.size}</b><br>`;
-  if(algo.backtracks !== undefined)
-    s += `backtracks: <b>${algo.backtracks}</b><br>` +
-         `parks: <b>${algo.parks}</b>  resumes: <b>${algo.resumes}</b><br>` +
-         `kills: <b>${algo.kills}</b>  parked: <b>${algo.parked.length}</b><br>`;
-  s += `done: <b>${algo.done}</b><br>`;
-  s += `time: <b>${algo.elapsed !== null ? (algo.elapsed/1000).toFixed(2)+'s' : '…'}</b>`;
+function fmtStats(stats, isLSB){
+  if(!stats) return '';
+  let s = `<div class="primary">unique cells: <b>${stats.unique}</b></div>` +
+          `expanded: <b>${stats.expanded}</b><br>` +
+          `path length: <b>${stats.pathLen ?? '—'}</b><br>` +
+          `frontier: <b>${stats.frontier}</b><br>`;
+  if(isLSB){
+    s += `backtracks: <b>${stats.backtracks}</b><br>` +
+         `parks: <b>${stats.parks}</b>  resumes: <b>${stats.resumes}</b><br>` +
+         `kills: <b>${stats.kills}</b>  parked: <b>${stats.parkedCount ?? 0}</b><br>`;
+  }
+  s += `done: <b>${stats.done}</b><br>`;
+  s += `alg time: <b>${(stats.algMs/1000).toFixed(3)}s</b>`;
   return s;
 }
 
+function renderCurrent(){
+  draw(ctxA, recording.grid, playbackA, currentA.path, currentA.parked);
+  draw(ctxL, recording.grid, playbackL, currentL.path, currentL.parked);
+  document.getElementById('sA').innerHTML = fmtStats(currentA.stats, false);
+  document.getElementById('sL').innerHTML = fmtStats(currentL.stats, true);
+}
+
 // ---------- driver ----------
-let grid, a, l, paused=false, t0=0, lastFrame=0, finished=false;
+let grid = null;
 
 function setScenario(name){
-  if(name==='open'){        START=[0,0]; GOAL=[W-1,H-1]; lastMazeType='—'; grid = makeOpen(); }
-  else if(name==='sparse'){ START=[0,0]; GOAL=[W-1,H-1]; lastMazeType='—'; grid = makeSparse(); }
-  else if(name==='r020'){   START=[0,0]; GOAL=[W-1,H-1]; lastMazeType='—'; grid = makeRandom(0.20, freshSeed()); }
-  else if(name==='r030'){   START=[0,0]; GOAL=[W-1,H-1]; lastMazeType='—'; grid = makeRandom(0.30, freshSeed()); }
-  else if(name==='r038'){   START=[0,0]; GOAL=[W-1,H-1]; lastMazeType='—'; grid = makeRandom(0.38, freshSeed()); }
-  else if(name==='maze_dfs'){     lastMazeType='DFS';     grid = makeMazeDFS(freshSeed());     START=[1,1]; GOAL=[W-3,H-3]; }
-  else if(name==='maze_prim'){    lastMazeType='Prim';    grid = makeMazePrim(freshSeed());    START=[1,1]; GOAL=[W-3,H-3]; }
-  else if(name==='maze_kruskal'){ lastMazeType='Kruskal'; grid = makeMazeKruskal(freshSeed()); START=[1,1]; GOAL=[W-3,H-3]; }
+  lastScenarioName = name;
+  if(name==='open'){        START=[0,0]; GOAL=[W-1,H-1]; grid = makeOpen(); }
+  else if(name==='sparse'){ START=[0,0]; GOAL=[W-1,H-1]; grid = makeSparse(); }
+  else if(name==='r020'){   START=[0,0]; GOAL=[W-1,H-1]; grid = makeRandom(0.20, freshSeed()); }
+  else if(name==='r030'){   START=[0,0]; GOAL=[W-1,H-1]; grid = makeRandom(0.30, freshSeed()); }
+  else if(name==='r038'){   START=[0,0]; GOAL=[W-1,H-1]; grid = makeRandom(0.38, freshSeed()); }
+  else if(name==='maze_dfs'){     grid = makeMazeDFS(freshSeed());     START=[1,1]; GOAL=[W-3,H-3]; }
+  else if(name==='maze_prim'){    grid = makeMazePrim(freshSeed());    START=[1,1]; GOAL=[W-3,H-3]; }
+  else if(name==='maze_kruskal'){ grid = makeMazeKruskal(freshSeed()); START=[1,1]; GOAL=[W-3,H-3]; }
   else if(name==='maze_any'){
     const t = MAZE_TYPES[Math.floor(Math.random()*MAZE_TYPES.length)];
-    lastMazeType = t.name;
     grid = t.fn(freshSeed());
     START=[1,1]; GOAL=[W-3,H-3];
   }
-  restart();
+  buildAndPlay();
 }
 
-function restart(){
-  a = new AStar(grid, START, GOAL);
-  l = new LSB(grid, START, GOAL);
-  paused=false; finished=false;
-  t0=performance.now();
-  lastFrame=0;
-  document.getElementById('pauseBtn').innerText = 'Pause';
-  draw(ctxA, grid, a); draw(ctxL, grid, l);
-  document.getElementById('sA').innerHTML = stats(a);
-  document.getElementById('sL').innerHTML = stats(l);
+function restartSame(){ buildAndPlay(); }
+
+function buildAndPlay(){
+  // Show banner, then compute synchronously, then start playback.
+  const banner = document.getElementById('banner');
+  banner.style.display = 'block';
+  banner.textContent = 'Calculating…';
+  document.getElementById('sA').innerHTML = '';
+  document.getElementById('sL').innerHTML = '';
+
+  setTimeout(() => {
+    const t0 = performance.now();
+    recording = buildRecording();
+    const computeMs = (performance.now() - t0).toFixed(0);
+    banner.textContent = 'Calculated in ' + computeMs + 'ms — playing back ' +
+                         recording.ticks + ' frames';
+    setTimeout(() => { banner.style.display = 'none'; }, 1200);
+
+    resetPlayback();
+    paused = false;
+    finished = false;
+    lastFrameTime = 0;
+    document.getElementById('pauseBtn').innerText = 'Pause';
+    renderCurrent();
+  }, 20);
 }
 
 function togglePause(){
@@ -634,50 +726,40 @@ function togglePause(){
 
 function loop(now){
   requestAnimationFrame(loop);
-  if(paused || finished) return;
-  if(now - lastFrame < TICK_DELAY) return;
-  lastFrame = now;
+  if(paused || finished || !recording) return;
+  if(now - lastFrameTime < TICK_DELAY) return;
+  lastFrameTime = now;
 
-  if(!a.done) a.step(BUDGET_PER_TICK);
-  if(!l.done) l.step(BUDGET_PER_TICK);
-
-  const tNow = performance.now();
-  if(a.done && a.elapsed === null) a.elapsed = tNow - t0;
-  if(l.done && l.elapsed === null) l.elapsed = tNow - t0;
-
-  draw(ctxA, grid, a);
-  draw(ctxL, grid, l);
-  document.getElementById('sA').innerHTML = stats(a);
-  document.getElementById('sL').innerHTML = stats(l);
-
-  if(a.done && l.done){
+  const target = playbackIdx + PLAYBACK_SPEED;
+  const lastIdx = recording.ticks - 1;
+  if(target >= lastIdx){
+    advanceToFrame(lastIdx);
+    renderCurrent();
     finished = true;
     document.getElementById('pauseBtn').innerText = 'Done';
+    return;
   }
+  advanceToFrame(target);
+  renderCurrent();
 }
 
 // ---------- mass test ----------
-const MASS_N = 12;              // 12 mazes = 4 of each type
+const MASS_N = 12;
 const MASS_MAX_ITERS = 20000;
 
 function runOne(algo){
-  const t0 = performance.now();
   let iters = 0;
-  while(!algo.done && iters < MASS_MAX_ITERS){
-    algo.step(500);
-    iters++;
-  }
-  const ms = performance.now() - t0;
+  while(!algo.done && iters < MASS_MAX_ITERS){ algo.step(BUDGET_PER_TICK); iters++; }
   return {
     done: algo.done,
     expanded: algo.expanded,
     unique: algo.visited.size,
     pathLen: algo.path ? algo.path.length : null,
-    backtracks: algo.backtracks !== undefined ? algo.backtracks : null,
-    parks: algo.parks !== undefined ? algo.parks : null,
-    resumes: algo.resumes !== undefined ? algo.resumes : null,
-    kills: algo.kills !== undefined ? algo.kills : null,
-    ms
+    backtracks: algo.backtracks,
+    parks: algo.parks,
+    resumes: algo.resumes,
+    kills: algo.kills,
+    algMs: algo.algMs
   };
 }
 
@@ -686,31 +768,20 @@ function massTest(){
   document.getElementById('pauseBtn').innerText = 'Resume';
   const out = document.getElementById('results');
   out.style.display = 'block';
-  out.textContent = 'Running ' + MASS_N + ' fresh mazes...';
+  out.textContent = 'Running ' + MASS_N + ' fresh mazes…';
 
   setTimeout(() => {
     const rows = [];
-    let aWins=0, lWins=0, ties=0;
-    let sumATime=0, sumLTime=0, sumAUniq=0, sumLUniq=0;
-    let sumAPath=0, sumLPath=0, sumLBT=0, sumLParks=0, sumLRes=0, sumLKills=0;
-    let aDNF=0, lDNF=0;
+    let aWins=0, lWins=0, ties=0, aDNF=0, lDNF=0;
+    const acc = { aTime:0, lTime:0, aUniq:0, lUniq:0, aPath:0, lPath:0,
+                  lBT:0, lParks:0, lRes:0, lKills:0, n:0 };
 
-    // Cycle through DFS, Prim, Kruskal so we get 4 of each
     for(let i=0; i<MASS_N; i++){
       const type = MAZE_TYPES[i % MAZE_TYPES.length];
-      const seed = freshSeed();
-      const g = type.fn(seed);
+      const g = type.fn(freshSeed());
       const S = [1,1], G = [W-3,H-3];
       const ra = runOne(new AStar(g, S, G));
       const rl = runOne(new LSB(g, S, G));
-
-      sumATime+=ra.ms; sumLTime+=rl.ms;
-      sumAUniq+=ra.unique; sumLUniq+=rl.unique;
-      sumAPath+=ra.pathLen??0; sumLPath+=rl.pathLen??0;
-      sumLBT += rl.backtracks??0;
-      sumLParks += rl.parks??0;
-      sumLRes += rl.resumes??0;
-      sumLKills += rl.kills??0;
       if(!ra.done) aDNF++;
       if(!rl.done) lDNF++;
 
@@ -718,12 +789,22 @@ function massTest(){
       if(!rl.done && !ra.done) verdict = 'both DNF';
       else if(!rl.done) verdict = 'A* (LSB DNF)';
       else if(!ra.done) verdict = 'LSB (A* DNF)';
-      else if(rl.unique < ra.unique){ verdict = 'LSB'; lWins++; }
-      else if(ra.unique < rl.unique){ verdict = 'A*';  aWins++; }
-      else { verdict = 'tie'; ties++; }
+      else if(rl.unique < ra.unique){ verdict='LSB'; lWins++; }
+      else if(ra.unique < rl.unique){ verdict='A*';  aWins++; }
+      else { verdict='tie'; ties++; }
 
-      rows.push({ type: type.name, seed,
-                  aTime:ra.ms, lTime:rl.ms,
+      if(ra.done && rl.done){
+        acc.aTime += ra.algMs; acc.lTime += rl.algMs;
+        acc.aUniq += ra.unique; acc.lUniq += rl.unique;
+        acc.aPath += ra.pathLen ?? 0; acc.lPath += rl.pathLen ?? 0;
+        acc.lBT += rl.backtracks ?? 0;
+        acc.lParks += rl.parks ?? 0;
+        acc.lRes += rl.resumes ?? 0;
+        acc.lKills += rl.kills ?? 0;
+        acc.n++;
+      }
+      rows.push({ type: type.name,
+                  aTime:ra.algMs, lTime:rl.algMs,
                   aUniq:ra.unique, lUniq:rl.unique,
                   aPath:ra.pathLen, lPath:rl.pathLen,
                   lBT:rl.backtracks, lParks:rl.parks,
@@ -736,7 +817,7 @@ function massTest(){
 
     let txt = '';
     txt += 'MASS TEST — ' + MASS_N + ' fresh mazes (' + W + 'x' + H + ')\n';
-    txt += 'All seeds randomised per-run. Verdict by unique-cells-touched.\n\n';
+    txt += 'Verdict by unique-cells-touched. Time is pure algorithm time.\n\n';
     txt += pad('type',9) + padL('A*ms',8) + padL('LSBms',8)
          + padL('A*uniq',8) + padL('LSBuniq',9)
          + padL('A*path',8) + padL('LSBpath',9)
@@ -758,34 +839,40 @@ function massTest(){
           + '  ' + r.verdict + '\n';
     }
     txt += '─'.repeat(9+8+8+8+9+8+9+7+6+5+6+10) + '\n';
-    txt += pad('AVG', 9)
-        + padL((sumATime/MASS_N).toFixed(1), 8)
-        + padL((sumLTime/MASS_N).toFixed(1), 8)
-        + padL((sumAUniq/MASS_N).toFixed(0), 8)
-        + padL((sumLUniq/MASS_N).toFixed(0), 9)
-        + padL((sumAPath/MASS_N).toFixed(0), 8)
-        + padL((sumLPath/MASS_N).toFixed(0), 9)
-        + padL((sumLBT/MASS_N).toFixed(0), 7)
-        + padL((sumLParks/MASS_N).toFixed(0), 6)
-        + padL((sumLRes/MASS_N).toFixed(0), 5)
-        + padL((sumLKills/MASS_N).toFixed(0), 6)
-        + '\n\n';
-    txt += 'WINS  A*: ' + aWins + '   LSB: ' + lWins + '   tie: ' + ties + '\n';
-    txt += 'DNF   A*: ' + aDNF + '   LSB: ' + lDNF + '\n\n';
-    txt += 'Per-type breakdown (unique cells, avg):\n';
+    if(acc.n > 0){
+      txt += pad('AVG', 9)
+          + padL((acc.aTime/acc.n).toFixed(1), 8)
+          + padL((acc.lTime/acc.n).toFixed(1), 8)
+          + padL((acc.aUniq/acc.n).toFixed(0), 8)
+          + padL((acc.lUniq/acc.n).toFixed(0), 9)
+          + padL((acc.aPath/acc.n).toFixed(0), 8)
+          + padL((acc.lPath/acc.n).toFixed(0), 9)
+          + padL((acc.lBT/acc.n).toFixed(0), 7)
+          + padL((acc.lParks/acc.n).toFixed(0), 6)
+          + padL((acc.lRes/acc.n).toFixed(0), 5)
+          + padL((acc.lKills/acc.n).toFixed(0), 6)
+          + '  (n=' + acc.n + ')\n';
+    }
+    txt += '\nWINS  A*: ' + aWins + '   LSB: ' + lWins + '   tie: ' + ties + '\n';
+    txt += 'DNF   A*: ' + aDNF + '   LSB: ' + lDNF + '\n';
+    txt += 'Averages exclude DNF (n = ' + acc.n + ' of ' + MASS_N + ').\n\n';
+    txt += 'Per-type breakdown (avg over successful runs):\n';
     for(const t of MAZE_TYPES){
-      const sub = rows.filter(r => r.type === t.name);
+      const sub = rows.filter(r => r.type === t.name && r.aDone && r.lDone);
+      if(sub.length === 0){ txt += '  ' + pad(t.name, 9) + '  (no successful runs)\n'; continue; }
       const aAvg = (sub.reduce((s,r)=>s+r.aUniq,0) / sub.length).toFixed(0);
       const lAvg = (sub.reduce((s,r)=>s+r.lUniq,0) / sub.length).toFixed(0);
       const lBT  = (sub.reduce((s,r)=>s+(r.lBT||0),0) / sub.length).toFixed(0);
-      txt += '  ' + pad(t.name, 9) + '  A* ' + padL(aAvg, 6) + '   LSB ' + padL(lAvg, 6)
-           + '   LSB avg backtracks ' + padL(lBT, 6) + '\n';
+      txt += '  ' + pad(t.name, 9) + '  A* ' + padL(aAvg, 6)
+           + '   LSB ' + padL(lAvg, 6)
+           + '   LSB avg backtracks ' + padL(lBT, 6)
+           + '   n=' + sub.length + '\n';
     }
-
     out.textContent = txt;
   }, 30);
 }
 
+// ---------- start ----------
 setScenario('maze_any');
 requestAnimationFrame(loop);
 </script>
