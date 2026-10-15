@@ -18,6 +18,11 @@
   button:active { background:#444; }
   .legend { font-size:11px; color:#888; margin-top:6px; }
   .sw { display:inline-block; width:10px; height:10px; vertical-align:middle; margin-right:4px; }
+  pre#results { background:#0a0a0a; padding:10px; border-radius:6px; font-size:11px;
+                line-height:1.4; overflow-x:auto; color:#ddd; margin-top:10px;
+                border:1px solid #333; white-space:pre; }
+  .win  { color:#6f6; }
+  .lose { color:#f88; }
 </style>
 </head>
 <body>
@@ -33,6 +38,7 @@
   <button onclick="setScenario('maze3')">Perfect maze #3</button>
   <button onclick="togglePause()" id="pauseBtn">Pause</button>
   <button onclick="restart()">Restart</button>
+  <button style="background:#333;border-color:#666" onclick="massTest()">▶ Mass test (10 mazes)</button>
 </div>
 
 <div class="row">
@@ -57,6 +63,8 @@
   <span class="sw" style="background:#0ff"></span>final path
   <span class="sw" style="background:#a00"></span>dead (scarred)
 </div>
+
+<pre id="results" style="display:none"></pre>
 
 <script>
 // ---------- config ----------
@@ -470,7 +478,6 @@ function loop(now){
   if(!a.done) a.step(BUDGET_PER_TICK);
   if(!l.done) l.step(BUDGET_PER_TICK);
 
-  // Stamp each algorithm's time the moment it finishes.
   const tNow = performance.now();
   if(a.done && a.elapsed === null) a.elapsed = tNow - t0;
   if(l.done && l.elapsed === null) l.elapsed = tNow - t0;
@@ -484,6 +491,137 @@ function loop(now){
     finished = true;
     document.getElementById('pauseBtn').innerText = 'Done';
   }
+}
+
+// ---------- mass test ----------
+// Runs N random perfect mazes headless. Same start/goal per maze.
+// Caps iterations so a stuck algorithm is marked DNF rather than hanging.
+const MASS_N = 10;
+const MASS_MAX_ITERS = 20000;
+
+function runOne(grid, algo){
+  // algo is a fresh instance. Step until done or cap.
+  const t0 = performance.now();
+  let iters = 0;
+  while(!algo.done && iters < MASS_MAX_ITERS){
+    algo.step(500);
+    iters++;
+  }
+  const ms = performance.now() - t0;
+  return {
+    done: algo.done,
+    expanded: algo.expanded,
+    unique: algo.visited.size,
+    pathLen: algo.path ? algo.path.length : null,
+    backtracks: algo.backtracks !== undefined ? algo.backtracks : null,
+    ms
+  };
+}
+
+function massTest(){
+  // Pause the live animation so it doesn't fight for the frame.
+  paused = true;
+  document.getElementById('pauseBtn').innerText = 'Resume';
+  const out = document.getElementById('results');
+  out.style.display = 'block';
+  out.textContent = 'Running ' + MASS_N + ' perfect mazes...\n';
+
+  // Defer so the "Running..." message paints before the synchronous block.
+  setTimeout(() => {
+    const rows = [];
+    let aWins = 0, lWins = 0, ties = 0;
+    let sumATime=0, sumLTime=0, sumAUniq=0, sumLUniq=0, sumAPath=0, sumLPath=0, sumLBT=0;
+    let aDNF=0, lDNF=0;
+
+    for(let i=1; i<=MASS_N; i++){
+      const g = makePerfectMaze(i * 1013);
+      const S = [1,1];
+      const G = [W-3,H-3];
+      const aa = new AStar(g, S, G);
+      const ll = new LSB(g, S, G);
+      const ra = runOne(g, aa);
+      const rl = runOne(g, ll);
+
+      sumATime += ra.ms;
+      sumLTime += rl.ms;
+      sumAUniq += ra.unique;
+      sumLUniq += rl.unique;
+      sumAPath += ra.pathLen ?? 0;
+      sumLPath += rl.pathLen ?? 0;
+      sumLBT   += rl.backtracks ?? 0;
+      if(!ra.done) aDNF++;
+      if(!rl.done) lDNF++;
+
+      // "winner" = fewer unique cells (fairer than wall time on JS engines)
+      let verdict;
+      if(!rl.done) verdict = 'A* (LSB DNF)';
+      else if(!ra.done) verdict = 'LSB (A* DNF)';
+      else if(rl.unique < ra.unique) { verdict = 'LSB'; lWins++; }
+      else if(ra.unique < rl.unique) { verdict = 'A*';  aWins++; }
+      else { verdict = 'tie'; ties++; }
+
+      rows.push({
+        seed: i*1013,
+        aTime: ra.ms, lTime: rl.ms,
+        aUniq: ra.unique, lUniq: rl.unique,
+        aPath: ra.pathLen, lPath: rl.pathLen,
+        lBT: rl.backtracks,
+        aDone: ra.done, lDone: rl.done,
+        verdict
+      });
+    }
+
+    const pad = (s, n) => {
+      s = String(s);
+      while(s.length < n) s += ' ';
+      return s.slice(0, n);
+    };
+    const padL = (s, n) => {
+      s = String(s);
+      while(s.length < n) s = ' ' + s;
+      return s.slice(-n);
+    };
+
+    let txt = '';
+    txt += 'MASS TEST — ' + MASS_N + ' perfect mazes (size ' + W + 'x' + H + ')\n';
+    txt += 'Winner by unique-cells-touched (lower is better).\n';
+    txt += '\n';
+    txt += pad('seed',7) + padL('A*ms',8) + padL('LSBms',8) +
+           padL('A*uniq',8) + padL('LSBuniq',9) +
+           padL('A*path',8) + padL('LSBpath',9) +
+           padL('LSBbt',7) + '  verdict\n';
+    txt += '─'.repeat(7+8+8+8+9+8+9+7+10) + '\n';
+    for(const r of rows){
+      txt += pad(r.seed, 7)
+          + padL(r.aTime.toFixed(1), 8)
+          + padL(r.lTime.toFixed(1), 8)
+          + padL(r.aDone ? r.aUniq : 'DNF', 8)
+          + padL(r.lDone ? r.lUniq : 'DNF', 9)
+          + padL(r.aPath ?? '—', 8)
+          + padL(r.lPath ?? '—', 9)
+          + padL(r.lBT ?? '—', 7)
+          + '  ' + r.verdict + '\n';
+    }
+    txt += '─'.repeat(7+8+8+8+9+8+9+7+10) + '\n';
+    txt += pad('AVG', 7)
+        + padL((sumATime/MASS_N).toFixed(1), 8)
+        + padL((sumLTime/MASS_N).toFixed(1), 8)
+        + padL((sumAUniq/MASS_N).toFixed(0), 8)
+        + padL((sumLUniq/MASS_N).toFixed(0), 9)
+        + padL((sumAPath/MASS_N).toFixed(0), 8)
+        + padL((sumLPath/MASS_N).toFixed(0), 9)
+        + padL((sumLBT/MASS_N).toFixed(0), 7)
+        + '\n\n';
+    txt += 'WINS  A*: ' + aWins + '   LSB: ' + lWins + '   tie: ' + ties + '\n';
+    txt += 'DNF   A*: ' + aDNF + '   LSB: ' + lDNF + '\n';
+    txt += '\n';
+    txt += 'Totals over ' + MASS_N + ' mazes:\n';
+    txt += '  A*  total unique: ' + sumAUniq + '   total time: ' + sumATime.toFixed(0) + ' ms\n';
+    txt += '  LSB total unique: ' + sumLUniq + '   total time: ' + sumLTime.toFixed(0) + ' ms\n';
+    txt += '  LSB total backtracks: ' + sumLBT + '\n';
+
+    out.textContent = txt;
+  }, 30);
 }
 
 setScenario('maze1');
