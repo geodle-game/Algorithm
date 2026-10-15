@@ -178,7 +178,7 @@ class AStar {
     this.closed = new Set();
     this.visited = new Set([key(start)]);
     this.frontier = new Set([key(start)]);
-    this.done=false; this.path=null; this.expanded=0;
+    this.done=false; this.path=null; this.expanded=0; this.elapsed=null;
   }
   step(budget){
     let spent = 0;
@@ -224,7 +224,7 @@ class Branch {
     this.cameFrom = cameFrom;
     this.pathSet = new Set();
     for(const c of this.path) this.pathSet.add(key(c));
-    this.stack = [];       // [{cell, options, nextIdx, pathIdx}]
+    this.stack = [];
     this.best = 0;
   }
   clone(){
@@ -253,7 +253,7 @@ class LSB {
     b.best = manhattan(start, goal);
     this.branches=[b];
     this.done=false; this.path=null; this.expanded=0; this.tick=0;
-    this.backtracks=0;
+    this.backtracks=0; this.elapsed=null;
     this.visited = new Set([key(start)]);
     this.frontier = new Set([key(start)]);
     this.dead = new Set();
@@ -283,18 +283,15 @@ class LSB {
   }
 
   stepBranch(b, next){
-    // goal check
     if(b.cell[0]===this.goal[0] && b.cell[1]===this.goal[1]){
       this.done=true; this.path=b.path; return;
     }
-    // candidates = open neighbors not already on this branch's path
     const opts = neighbors(this.grid, b.cell).filter(n => !b.pathSet.has(key(n)));
     if(opts.length === 0){
       const dead = this.backtrack(b, next);
       if(!dead) next.push(b);
       return;
     }
-    // sort by distance to goal
     opts.sort((p,q) => euclid(p, this.goal) - euclid(q, this.goal));
     const primary = opts[0];
 
@@ -303,7 +300,6 @@ class LSB {
       const tied = opts.filter(o => Math.abs(euclid(o, this.goal) - bestD) < this.tryEps);
 
       if(tied.length > 1){
-        // fork off for each alternate tied option
         for(let i=1; i<tied.length; i++){
           if(next.length + this.branches.length >= this.max_branches) break;
           const nb = b.clone();
@@ -323,7 +319,6 @@ class LSB {
           this.expanded++;
           next.push(nb);
         }
-        // parent stack entry: skip all tied options
         b.stack.push({
           cell: b.cell,
           options: opts.slice(),
@@ -340,7 +335,6 @@ class LSB {
       }
     }
 
-    // take primary
     b.path.push(primary);
     b.pathSet.add(key(primary));
     b.cameFrom = b.cell;
@@ -356,7 +350,6 @@ class LSB {
     next.push(b);
   }
 
-  // Returns true if branch is dead (exhausted), false otherwise.
   backtrack(b, next){
     this.backtracks++;
     while(b.stack.length > 0){
@@ -364,12 +357,10 @@ class LSB {
       if(top.nextIdx < top.options.length){
         const nt = top.options[top.nextIdx];
         top.nextIdx++;
-        // rewind path to the junction
         for(let i = b.path.length - 1; i > top.pathIdx; i--){
           b.pathSet.delete(key(b.path[i]));
         }
         b.path = b.path.slice(0, top.pathIdx + 1);
-        // step to the new option
         b.path.push(nt);
         b.pathSet.add(key(nt));
         b.cameFrom = top.cell;
@@ -385,7 +376,6 @@ class LSB {
       }
       b.stack.pop();
     }
-    // truly exhausted — scar path
     for(const c of b.path){
       this._scarAdd(c, 0.5);
       this.dead.add(key(c));
@@ -433,7 +423,8 @@ function stats(algo){
           `path length: <b>${algo.path?algo.path.length:'—'}</b><br>` +
           `frontier: <b>${algo.frontier.size}</b><br>`;
   if(algo.backtracks !== undefined) s += `backtracks: <b>${algo.backtracks}</b><br>`;
-  s += `done: <b>${algo.done}</b>`;
+  s += `done: <b>${algo.done}</b><br>`;
+  s += `time: <b>${algo.elapsed !== null ? (algo.elapsed/1000).toFixed(2)+'s' : '…'}</b>`;
   return s;
 }
 
@@ -457,11 +448,13 @@ function restart(){
   l = new LSB(grid, START, GOAL);
   paused=false; finished=false;
   t0=performance.now();
+  lastFrame=0;
   document.getElementById('pauseBtn').innerText = 'Pause';
   draw(ctxA, grid, a); draw(ctxL, grid, l);
   document.getElementById('sA').innerHTML = stats(a);
   document.getElementById('sL').innerHTML = stats(l);
 }
+
 function togglePause(){
   if(finished) return;
   paused = !paused;
@@ -477,15 +470,17 @@ function loop(now){
   if(!a.done) a.step(BUDGET_PER_TICK);
   if(!l.done) l.step(BUDGET_PER_TICK);
 
+  // Stamp each algorithm's time the moment it finishes.
+  const tNow = performance.now();
+  if(a.done && a.elapsed === null) a.elapsed = tNow - t0;
+  if(l.done && l.elapsed === null) l.elapsed = tNow - t0;
+
   draw(ctxA, grid, a);
   draw(ctxL, grid, l);
   document.getElementById('sA').innerHTML = stats(a);
   document.getElementById('sL').innerHTML = stats(l);
 
   if(a.done && l.done){
-    const el = ((performance.now()-t0)/1000).toFixed(2);
-    document.getElementById('sA').innerHTML += `<br>time: <b>${el}s</b>`;
-    document.getElementById('sL').innerHTML += `<br>time: <b>${el}s</b>`;
     finished = true;
     document.getElementById('pauseBtn').innerText = 'Done';
   }
