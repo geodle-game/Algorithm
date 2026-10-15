@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LSB vs A* — 200×100</title>
+<title>LSB vs A*</title>
 <style>
   body { background:#111; color:#eee; font-family: monospace; margin:0; padding:12px; }
   h2 { margin: 4px 0; font-size: 15px; }
@@ -13,24 +13,20 @@
   .panel { background:#181818; padding:8px; border-radius:6px; }
   .stats { font-size:12px; line-height:1.5; color:#bbb; }
   .stats b { color:#fff; }
-  .stats .primary { color:#fff; font-size:14px; margin-bottom:4px; }
   button { background:#2a2a2a; color:#eee; border:1px solid #444; padding:8px 12px;
            border-radius:5px; font-family:monospace; font-size:13px; margin:3px; }
   button:active { background:#444; }
-  button.speed-on { background:#3a5a3a; border-color:#7a7; }
-  .legend { font-size:11px; color:#888; margin-top:6px; }
-  .sw { display:inline-block; width:10px; height:10px; vertical-align:middle; margin-right:4px; }
+  button.speed-on { background:#3a5a3a; border-color:#7a7a7a; }
   pre#results { background:#0a0a0a; padding:10px; border-radius:6px; font-size:11px;
                 line-height:1.4; overflow-x:auto; color:#ddd; margin-top:10px;
                 border:1px solid #333; white-space:pre; }
   .banner { background:#222; padding:6px 10px; border-radius:4px; font-size:12px;
             color:#ff0; margin-bottom:6px; display:none; }
-  .speed-label { color:#888; font-size:12px; margin-right:6px; }
 </style>
 </head>
 <body>
 
-<div class="banner" id="banner">Calculating…</div>
+<div class="banner" id="banner">Calculating...</div>
 
 <div class="panel" style="margin-bottom:8px;">
   <button onclick="setScenario('open')">Open</button>
@@ -44,21 +40,24 @@
   <button onclick="setScenario('maze_any')">Maze (random)</button>
   <button onclick="togglePause()" id="pauseBtn">Pause</button>
   <button onclick="restartSame()">Replay</button>
-  <button style="background:#333;border-color:#666" onclick="massTest(false)">▶ Mass test (12)</button>
-  <button style="background:#333;border-color:#666" onclick="massTest(true)">↺ Reuse last seeds</button>
 </div>
 
 <div class="panel" style="margin-bottom:8px;">
-  <span class="speed-label">Speed:</span>
-  <button class="speed-btn" data-sp="0.1"  onclick="setSpeed(0.1)">0.1×</button>
-  <button class="speed-btn" data-sp="0.25" onclick="setSpeed(0.25)">0.25×</button>
-  <button class="speed-btn" data-sp="0.5"  onclick="setSpeed(0.5)">0.5×</button>
-  <button class="speed-btn" data-sp="1"    onclick="setSpeed(1)">1×</button>
-  <button class="speed-btn" data-sp="2"    onclick="setSpeed(2)">2×</button>
-  <button class="speed-btn" data-sp="4"    onclick="setSpeed(4)">4×</button>
-  <button class="speed-btn" data-sp="16"   onclick="setSpeed(16)">16×</button>
-  <button class="speed-btn" data-sp="64"   onclick="setSpeed(64)">64×</button>
-  <button class="speed-btn" data-sp="9999" onclick="setSpeed(9999)">⚡ instant</button>
+  <button style="background:#333;border-color:#666" onclick="massTest(false)">Mass test (12)</button>
+  <button style="background:#333;border-color:#666" onclick="massTest(true)">Reuse last seeds</button>
+</div>
+
+<div class="panel" style="margin-bottom:8px;">
+  <span style="color:#888;font-size:12px;margin-right:6px;">Speed:</span>
+  <button class="speed-btn" data-sp="0.1"  onclick="setSpeed(0.1)">0.1x</button>
+  <button class="speed-btn" data-sp="0.25" onclick="setSpeed(0.25)">0.25x</button>
+  <button class="speed-btn" data-sp="0.5"  onclick="setSpeed(0.5)">0.5x</button>
+  <button class="speed-btn" data-sp="1"    onclick="setSpeed(1)">1x</button>
+  <button class="speed-btn" data-sp="2"    onclick="setSpeed(2)">2x</button>
+  <button class="speed-btn" data-sp="4"    onclick="setSpeed(4)">4x</button>
+  <button class="speed-btn" data-sp="16"   onclick="setSpeed(16)">16x</button>
+  <button class="speed-btn" data-sp="64"   onclick="setSpeed(64)">64x</button>
+  <button class="speed-btn" data-sp="9999" onclick="setSpeed(9999)">Instant</button>
 </div>
 
 <div class="row">
@@ -74,711 +73,891 @@
   </div>
 </div>
 
-<div class="legend panel">
-  <span class="sw" style="background:#0a0"></span>start
-  <span class="sw" style="background:#c0c"></span>goal
-  <span class="sw" style="background:#555"></span>wall
-  <span class="sw" style="background:#ff0"></span>active branch head
-  <span class="sw" style="background:#f80"></span>parked frontier
-  <span class="sw" style="background:#2a4a7a"></span>visited
-  <span class="sw" style="background:#0ff"></span>final path
-  <span class="sw" style="background:#a00"></span>dead (scarred)
-</div>
-
 <pre id="results" style="display:none"></pre>
 
 <script>
-// ===================================================================
-// config
-// ===================================================================
-const W = 200, H = 100;
-const CELL = 3;                              // canvas = 600×300
-const TICK_DELAY = 16;
-const BUDGET_PER_TICK = 8;
-const RECORD_MAX_TICKS = 20000;              // was 5000; 200×100 needs more
-const MASS_MAX_ITERS   = 60000;              // was 20000; same reason
+var W = 200, H = 100;
+var CELL = 3;
+var TICK_DELAY = 16;
+var BUDGET_PER_TICK = 8;
+var RECORD_MAX_TICKS = 20000;
+var MASS_MAX_ITERS = 60000;
+var PLAYBACK_SPEED = 1;
 
-let PLAYBACK_SPEED = 1;
-let START = [0, 0];
-let GOAL  = [W-1, H-1];
+var START = [0, 0];
+var GOAL  = [W-1, H-1];
+var grid = null;
 
-// ===================================================================
-// rng / seeds
-// ===================================================================
-function rng(seed){ let s=seed>>>0; return ()=>{ s=(s*1664525+1013904223)>>>0; return s/4294967296; }; }
-let seedCounter = 0;
+// ---- rng ----
+function rng(seed){
+  var s = seed >>> 0;
+  return function(){
+    s = (s * 1664525 + 1013904223) >>> 0;
+    return s / 4294967296;
+  };
+}
+var seedCounter = 0;
 function freshSeed(){
   seedCounter++;
-  const t = Date.now() >>> 0;
-  const r = Math.floor(Math.random() * 0xFFFFFFFF) >>> 0;
-  return ((t ^ r ^ (seedCounter * 2654435761)) >>> 0);
+  var t = Date.now() >>> 0;
+  var r = Math.floor(Math.random() * 0xFFFFFFFF) >>> 0;
+  return (t ^ r ^ (seedCounter * 2654435761)) >>> 0;
 }
 
-// ===================================================================
-// grid generators
-// ===================================================================
-function makeOpen(){ return Array.from({length:H},()=>Array(W).fill(0)); }
+// ---- grid generators ----
+function makeOpen(){
+  var g = [];
+  for(var y=0; y<H; y++){
+    var row = [];
+    for(var x=0; x<W; x++) row.push(0);
+    g.push(row);
+  }
+  return g;
+}
+
 function makeSparse(){
-  const g = Array.from({length:H},()=>Array(W).fill(0));
-  // scale the block layout to the grid
-  const sx = W/60, sy = H/30;
-  const blocks = [[10,5,16,24],[26,12,32,28],[36,4,44,14],[48,18,58,26]];
-  for(const [x0,y0,x1,y1] of blocks)
-    for(let y=Math.floor(y0*sy); y<Math.floor(y1*sy); y++)
-      for(let x=Math.floor(x0*sx); x<Math.floor(x1*sx); x++)
-        g[y][x]=1;
-  g[0][0]=0; g[H-1][W-1]=0;
+  var g = [];
+  for(var y=0; y<H; y++){
+    var row = [];
+    for(var x=0; x<W; x++) row.push(0);
+    g.push(row);
+  }
+  var sx = W / 60, sy = H / 30;
+  var blocks = [[10,5,16,24],[26,12,32,28],[36,4,44,14],[48,18,58,26]];
+  for(var i=0; i<blocks.length; i++){
+    var b = blocks[i];
+    var x0 = Math.floor(b[0]*sx), y0 = Math.floor(b[1]*sy);
+    var x1 = Math.floor(b[2]*sx), y1 = Math.floor(b[3]*sy);
+    for(var yy=y0; yy<y1; yy++){
+      for(var xx=x0; xx<x1; xx++){
+        if(yy>=0 && yy<H && xx>=0 && xx<W) g[yy][xx] = 1;
+      }
+    }
+  }
+  g[0][0] = 0;
+  g[H-1][W-1] = 0;
   return g;
 }
+
 function makeRandom(density, seed){
-  const r = rng(seed);
-  const g = Array.from({length:H},()=>Array(W).fill(0));
-  for(let y=0;y<H;y++) for(let x=0;x<W;x++) if(r()<density) g[y][x]=1;
-  g[0][0]=0; g[H-1][W-1]=0;
+  var r = rng(seed);
+  var g = [];
+  for(var y=0; y<H; y++){
+    var row = [];
+    for(var x=0; x<W; x++) row.push(r() < density ? 1 : 0);
+    g.push(row);
+  }
+  g[0][0] = 0;
+  g[H-1][W-1] = 0;
   return g;
 }
-function roomDims(){ return [Math.floor((W-1)/2), Math.floor((H-1)/2)]; }
+
+function roomDims(){
+  return [Math.floor((W-1)/2), Math.floor((H-1)/2)];
+}
 
 function makeMazeDFS(seed){
-  const r = rng(seed);
-  const [rx, ry] = roomDims();
-  const g = Array.from({length:H},()=>Array(W).fill(1));
-  const visited = Array.from({length:ry},()=>Array(rx).fill(false));
-  const stack = [[0,0]];
-  visited[0][0] = true; g[1][1] = 0;
-  while(stack.length){
-    const [cx,cy] = stack[stack.length-1];
-    const dirs = [[1,0],[-1,0],[0,1],[0,-1]];
-    for(let i=dirs.length-1;i>0;i--){ const j=Math.floor(r()*(i+1)); [dirs[i],dirs[j]]=[dirs[j],dirs[i]]; }
-    let moved=false;
-    for(const [dx,dy] of dirs){
-      const nx=cx+dx, ny=cy+dy;
-      if(nx<0||nx>=rx||ny<0||ny>=ry) continue;
+  var r = rng(seed);
+  var dims = roomDims();
+  var rx = dims[0], ry = dims[1];
+  var g = [];
+  for(var y=0; y<H; y++){
+    var row = [];
+    for(var x=0; x<W; x++) row.push(1);
+    g.push(row);
+  }
+  var visited = [];
+  for(var yy=0; yy<ry; yy++){
+    var vr = [];
+    for(var xx=0; xx<rx; xx++) vr.push(false);
+    visited.push(vr);
+  }
+  var stack = [[0,0]];
+  visited[0][0] = true;
+  g[1][1] = 0;
+  while(stack.length > 0){
+    var top = stack[stack.length-1];
+    var cx = top[0], cy = top[1];
+    var dirs = [[1,0],[-1,0],[0,1],[0,-1]];
+    for(var i=dirs.length-1; i>0; i--){
+      var j = Math.floor(r()*(i+1));
+      var tmp = dirs[i]; dirs[i] = dirs[j]; dirs[j] = tmp;
+    }
+    var moved = false;
+    for(var k=0; k<dirs.length; k++){
+      var dx = dirs[k][0], dy = dirs[k][1];
+      var nx = cx + dx, ny = cy + dy;
+      if(nx<0 || nx>=rx || ny<0 || ny>=ry) continue;
       if(visited[ny][nx]) continue;
-      g[cy*2+1+dy][cx*2+1+dx]=0;
-      g[ny*2+1][nx*2+1]=0;
-      visited[ny][nx]=true; stack.push([nx,ny]); moved=true; break;
+      g[cy*2+1+dy][cx*2+1+dx] = 0;
+      g[ny*2+1][nx*2+1] = 0;
+      visited[ny][nx] = true;
+      stack.push([nx,ny]);
+      moved = true;
+      break;
     }
     if(!moved) stack.pop();
   }
   return g;
 }
+
 function makeMazePrim(seed){
-  const r = rng(seed);
-  const [rx, ry] = roomDims();
-  const g = Array.from({length:H},()=>Array(W).fill(1));
-  const inMaze = Array.from({length:ry},()=>Array(rx).fill(false));
-  const frontier = [];
-  inMaze[0][0] = true; g[1][1] = 0;
-  for(const [dx,dy] of [[1,0],[-1,0],[0,1],[0,-1]]){
-    const nx=dx, ny=dy;
-    if(nx>=0&&nx<rx&&ny>=0&&ny<ry) frontier.push([nx,ny,0,0]);
+  var r = rng(seed);
+  var dims = roomDims();
+  var rx = dims[0], ry = dims[1];
+  var g = [];
+  for(var y=0; y<H; y++){
+    var row = [];
+    for(var x=0; x<W; x++) row.push(1);
+    g.push(row);
   }
-  while(frontier.length){
-    const i = Math.floor(r()*frontier.length);
-    const [nx,ny,px,py] = frontier.splice(i,1)[0];
-    if(inMaze[ny][nx]) continue;
-    g[ny*2+1][nx*2+1] = 0;
-    g[py*2+1 + (ny-py)][px*2+1 + (nx-px)] = 0;
-    inMaze[ny][nx] = true;
-    for(const [dx,dy] of [[1,0],[-1,0],[0,1],[0,-1]]){
-      const ax=nx+dx, ay=ny+dy;
-      if(ax>=0&&ax<rx&&ay>=0&&ay<ry&&!inMaze[ay][ax]) frontier.push([ax,ay,nx,ny]);
+  var inMaze = [];
+  for(var yy=0; yy<ry; yy++){
+    var vr = [];
+    for(var xx=0; xx<rx; xx++) vr.push(false);
+    inMaze.push(vr);
+  }
+  var frontier = [];
+  inMaze[0][0] = true;
+  g[1][1] = 0;
+  var seedDirs = [[1,0],[-1,0],[0,1],[0,-1]];
+  for(var i=0; i<seedDirs.length; i++){
+    var nx = seedDirs[i][0], ny = seedDirs[i][1];
+    if(nx>=0 && nx<rx && ny>=0 && ny<ry) frontier.push([nx,ny,0,0]);
+  }
+  while(frontier.length > 0){
+    var idx = Math.floor(r() * frontier.length);
+    var item = frontier.splice(idx, 1)[0];
+    var nx2 = item[0], ny2 = item[1], px = item[2], py = item[3];
+    if(inMaze[ny2][nx2]) continue;
+    g[ny2*2+1][nx2*2+1] = 0;
+    g[py*2+1 + (ny2-py)][px*2+1 + (nx2-px)] = 0;
+    inMaze[ny2][nx2] = true;
+    for(var k=0; k<seedDirs.length; k++){
+      var ax = nx2 + seedDirs[k][0], ay = ny2 + seedDirs[k][1];
+      if(ax>=0 && ax<rx && ay>=0 && ay<ry && !inMaze[ay][ax]) frontier.push([ax,ay,nx2,ny2]);
     }
   }
   return g;
 }
+
 function makeMazeKruskal(seed){
-  const r = rng(seed);
-  const [rx, ry] = roomDims();
-  const g = Array.from({length:H},()=>Array(W).fill(1));
-  for(let y=0;y<ry;y++) for(let x=0;x<rx;x++) g[y*2+1][x*2+1]=0;
-  const parent = new Int32Array(rx*ry);
-  for(let i=0;i<rx*ry;i++) parent[i]=i;
-  function find(x){ while(parent[x]!==x){ parent[x]=parent[parent[x]]; x=parent[x]; } return x; }
-  const walls = [];
-  for(let y=0;y<ry;y++) for(let x=0;x<rx;x++){
-    if(x+1<rx) walls.push([x,y,x+1,y]);
-    if(y+1<ry) walls.push([x,y,x,y+1]);
+  var r = rng(seed);
+  var dims = roomDims();
+  var rx = dims[0], ry = dims[1];
+  var g = [];
+  for(var y=0; y<H; y++){
+    var row = [];
+    for(var x=0; x<W; x++) row.push(1);
+    g.push(row);
   }
-  for(let i=walls.length-1;i>0;i--){ const j=Math.floor(r()*(i+1)); [walls[i],walls[j]]=[walls[j],walls[i]]; }
-  for(const [x1,y1,x2,y2] of walls){
-    const ra = find(y1*rx+x1), rb = find(y2*rx+x2);
-    if(ra!==rb){ parent[ra] = rb; g[y1*2+1 + (y2-y1)][x1*2+1 + (x2-x1)] = 0; }
+  for(var yy=0; yy<ry; yy++){
+    for(var xx=0; xx<rx; xx++) g[yy*2+1][xx*2+1] = 0;
+  }
+  var parent = new Int32Array(rx*ry);
+  for(var i=0; i<rx*ry; i++) parent[i] = i;
+  function find(x){
+    while(parent[x] !== x){
+      parent[x] = parent[parent[x]];
+      x = parent[x];
+    }
+    return x;
+  }
+  var walls = [];
+  for(var y2=0; y2<ry; y2++){
+    for(var x2=0; x2<rx; x2++){
+      if(x2+1 < rx) walls.push([x2,y2,x2+1,y2]);
+      if(y2+1 < ry) walls.push([x2,y2,x2,y2+1]);
+    }
+  }
+  for(var k=walls.length-1; k>0; k--){
+    var j = Math.floor(r()*(k+1));
+    var tmp = walls[k]; walls[k] = walls[j]; walls[j] = tmp;
+  }
+  for(var wi=0; wi<walls.length; wi++){
+    var wall = walls[wi];
+    var ra = find(wall[1]*rx + wall[0]);
+    var rb = find(wall[3]*rx + wall[2]);
+    if(ra !== rb){
+      parent[ra] = rb;
+      var wx = wall[0]*2+1 + (wall[2]-wall[0]);
+      var wy = wall[1]*2+1 + (wall[3]-wall[1]);
+      g[wy][wx] = 0;
+    }
   }
   return g;
 }
-const MAZE_TYPES = [
+
+var MAZE_TYPES = [
   { name:'DFS',     fn: makeMazeDFS },
   { name:'Prim',    fn: makeMazePrim },
-  { name:'Kruskal', fn: makeMazeKruskal },
+  { name:'Kruskal', fn: makeMazeKruskal }
 ];
 
-// ===================================================================
-// helpers
-// ===================================================================
-function manhattan(a,b){ return Math.abs(a[0]-b[0])+Math.abs(a[1]-b[1]); }
-function euclid(a,b){ const dx=a[0]-b[0],dy=a[1]-b[1]; return Math.hypot(dx,dy); }
-const N4 = [[1,0],[-1,0],[0,1],[0,-1]];
-function neighbors(grid,c){
-  const out=[];
-  for(const [dx,dy] of N4){
-    const x=c[0]+dx, y=c[1]+dy;
-    if(x>=0&&x<W&&y>=0&&y<H&&grid[y][x]===0) out.push([x,y]);
+// ---- helpers ----
+function manhattan(a,b){ return Math.abs(a[0]-b[0]) + Math.abs(a[1]-b[1]); }
+function euclid(a,b){ var dx = a[0]-b[0], dy = a[1]-b[1]; return Math.sqrt(dx*dx + dy*dy); }
+var N4 = [[1,0],[-1,0],[0,1],[0,-1]];
+function neighbors(g, c){
+  var out = [];
+  for(var i=0; i<N4.length; i++){
+    var x = c[0] + N4[i][0];
+    var y = c[1] + N4[i][1];
+    if(x>=0 && x<W && y>=0 && y<H && g[y][x] === 0) out.push([x,y]);
   }
   return out;
 }
-function key(c){ return c[1]*W+c[0]; }
+function key(c){ return c[1]*W + c[0]; }
 
-function validatePath(grid, path, start, goal){
-  if(!path || path.length === 0) return {ok:false, reason:'empty path'};
+function validatePath(g, path, start, goal){
+  if(!path || path.length === 0) return { ok:false, reason:'empty path' };
   if(path[0][0] !== start[0] || path[0][1] !== start[1])
-    return {ok:false, reason:'does not start at START'};
-  const last = path[path.length - 1];
+    return { ok:false, reason:'does not start at START' };
+  var last = path[path.length-1];
   if(last[0] !== goal[0] || last[1] !== goal[1])
-    return {ok:false, reason:'does not end at GOAL'};
-  for(let i=0; i<path.length; i++){
-    const [x,y] = path[i];
-    if(x<0||x>=W||y<0||y>=H) return {ok:false, reason:'out of bounds at '+i};
-    if(grid[y][x] !== 0) return {ok:false, reason:'crosses wall at '+i};
-    if(i>0){
-      const [px,py] = path[i-1];
-      if(Math.abs(x-px)+Math.abs(y-py) !== 1)
-        return {ok:false, reason:'non-adjacent at '+i};
+    return { ok:false, reason:'does not end at GOAL' };
+  for(var i=0; i<path.length; i++){
+    var x = path[i][0], y = path[i][1];
+    if(x<0 || x>=W || y<0 || y>=H) return { ok:false, reason:'out of bounds at ' + i };
+    if(g[y][x] !== 0) return { ok:false, reason:'crosses wall at ' + i };
+    if(i > 0){
+      var px = path[i-1][0], py = path[i-1][1];
+      if(Math.abs(x-px) + Math.abs(y-py) !== 1)
+        return { ok:false, reason:'non-adjacent at ' + i };
     }
   }
-  return {ok:true};
+  return { ok:true };
 }
 
 function fmtTime(ms){
-  if(ms < 0.001) return (ms*1e6).toFixed(0)+'ns';
-  if(ms < 1)     return (ms*1000).toFixed(0)+'μs';
-  if(ms < 1000)  return ms.toFixed(2)+'ms';
-  return (ms/1000).toFixed(3)+'s';
+  if(ms < 0.001) return (ms * 1e6).toFixed(0) + 'ns';
+  if(ms < 1)     return (ms * 1000).toFixed(0) + 'us';
+  if(ms < 1000)  return ms.toFixed(2) + 'ms';
+  return (ms / 1000).toFixed(3) + 's';
 }
 
-// ===================================================================
-// MinHeap
-// ===================================================================
-class MinHeap {
-  constructor(){ this.h=[]; }
-  push(item){ this.h.push(item); this._up(this.h.length-1); }
-  pop(){
-    const top = this.h[0];
-    const last = this.h.pop();
-    if(this.h.length){ this.h[0]=last; this._down(0); }
-    return top;
+// ---- MinHeap ----
+function MinHeap(){ this.h = []; }
+MinHeap.prototype.push = function(item){
+  this.h.push(item);
+  var i = this.h.length - 1;
+  while(i > 0){
+    var p = (i-1) >> 1;
+    if(this.h[p][0] <= this.h[i][0]) break;
+    var tmp = this.h[p]; this.h[p] = this.h[i]; this.h[i] = tmp;
+    i = p;
   }
-  get size(){ return this.h.length; }
-  _up(i){ const h=this.h; while(i>0){ const p=(i-1)>>1; if(h[p][0]<=h[i][0]) break; [h[p],h[i]]=[h[i],h[p]]; i=p; } }
-  _down(i){
-    const h=this.h, n=h.length;
+};
+MinHeap.prototype.pop = function(){
+  var top = this.h[0];
+  var last = this.h.pop();
+  if(this.h.length > 0){
+    this.h[0] = last;
+    var i = 0, n = this.h.length;
     while(true){
-      let l=2*i+1, r=2*i+2, s=i;
-      if(l<n && h[l][0]<h[s][0]) s=l;
-      if(r<n && h[r][0]<h[s][0]) s=r;
-      if(s===i) break;
-      [h[s],h[i]]=[h[i],h[s]]; i=s;
+      var l = 2*i+1, r = 2*i+2, s = i;
+      if(l < n && this.h[l][0] < this.h[s][0]) s = l;
+      if(r < n && this.h[r][0] < this.h[s][0]) s = r;
+      if(s === i) break;
+      var tmp = this.h[s]; this.h[s] = this.h[i]; this.h[i] = tmp;
+      i = s;
     }
   }
+  return top;
+};
+Object.defineProperty(MinHeap.prototype, 'size', {
+  get: function(){ return this.h.length; }
+});
+
+// ---- A* ----
+function AStar(g, start, goal){
+  this.grid = g;
+  this.start = start;
+  this.goal = goal;
+  this.open = new MinHeap();
+  this.open.push([manhattan(start,goal), 0, start]);
+  this.gMap = {};
+  this.gMap[key(start)] = 0;
+  this.came = {};
+  this.closed = {};
+  this.visited = {};
+  this.generated = {};
+  this.expanded = {};
+  this.frontier = {};
+  this.visited[key(start)] = true;
+  this.generated[key(start)] = true;
+  this.frontier[key(start)] = true;
+  this.expandedCount = 0;
+  this.done = false;
+  this.exhausted = false;
+  this.path = null;
+  this.algMs = 0;
 }
 
-// ===================================================================
-// A*
-// ===================================================================
-class AStar {
-  constructor(grid, start, goal){
-    this.grid=grid; this.start=start; this.goal=goal;
-    this.open = new MinHeap();
-    this.open.push([manhattan(start,goal), 0, start]);
-    this.g = new Map(); this.g.set(key(start), 0);
-    this.came = new Map();
-    this.closed = new Set();
-    this.visited  = new Set([key(start)]);
-    this.generated = new Set([key(start)]);
-    this.expanded  = new Set();
-    this.frontier = new Set([key(start)]);
-    this.done=false; this.exhausted=false; this.path=null;
-    this.algMs = 0;
-  }
-  step(budget){
-    const t0 = performance.now();
-    let spent = 0;
-    while(spent < budget && !this.done){
-      if(this.open.size === 0){ this.done=true; this.exhausted=true; break; }
-      const [,g,c] = this.open.pop();
-      const kc = key(c);
-      if(this.closed.has(kc)) continue;
-      this.closed.add(kc);
-      this.visited.add(kc);
-      this.expanded.add(kc);
-      this.frontier.delete(kc);
-      spent++;
-      if(c[0]===this.goal[0] && c[1]===this.goal[1]){
-        this.done=true; this._recon(c); break;
-      }
-      for(const n of neighbors(this.grid,c)){
-        const ng = g+1;
-        const kn = key(n);
-        if(this.closed.has(kn)) continue;
-        const cur = this.g.get(kn);
-        if(cur===undefined || ng < cur){
-          this.g.set(kn, ng);
-          this.came.set(kn, c);
-          this.open.push([ng+manhattan(n,this.goal), ng, n]);
-          this.frontier.add(kn);
-          this.generated.add(kn);
-          this.visited.add(kn);
-        }
+AStar.prototype.step = function(budget){
+  var t0 = performance.now();
+  var spent = 0;
+  while(spent < budget && !this.done){
+    if(this.open.size === 0){ this.done = true; this.exhausted = true; break; }
+    var item = this.open.pop();
+    var gcost = item[1];
+    var c = item[2];
+    var kc = key(c);
+    if(this.closed[kc]) continue;
+    this.closed[kc] = true;
+    this.visited[kc] = true;
+    this.expanded[kc] = true;
+    this.expandedCount++;
+    delete this.frontier[kc];
+    spent++;
+    if(c[0] === this.goal[0] && c[1] === this.goal[1]){
+      this.done = true;
+      this._recon(c);
+      break;
+    }
+    var ns = neighbors(this.grid, c);
+    for(var i=0; i<ns.length; i++){
+      var n = ns[i];
+      var ng = gcost + 1;
+      var kn = key(n);
+      if(this.closed[kn]) continue;
+      var cur = this.gMap[kn];
+      if(cur === undefined || ng < cur){
+        this.gMap[kn] = ng;
+        this.came[kn] = c;
+        this.open.push([ng + manhattan(n, this.goal), ng, n]);
+        this.frontier[kn] = true;
+        this.generated[kn] = true;
+        this.visited[kn] = true;
       }
     }
-    this.algMs += performance.now() - t0;
   }
-  _recon(end){
-    const p=[]; let c=end;
-    while(c){ p.push(c); c=this.came.get(key(c)); }
-    p.reverse(); this.path=p;
-  }
-}
+  this.algMs += performance.now() - t0;
+};
 
-// ===================================================================
-// LSB
-// ===================================================================
-class Branch {
-  constructor(cell, path, cameFrom){
-    this.cell = cell;
-    this.path = path.slice();
-    this.cameFrom = cameFrom;
-    this.pathSet = new Set();
-    for(const c of this.path) this.pathSet.add(key(c));
-    this.stack = [];
-    this.bestEver = manhattan(cell, GOAL);
-    this.parkCount = 0;
-    this.parked = false;
+AStar.prototype._recon = function(end){
+  var p = [];
+  var c = end;
+  while(c){
+    p.push(c);
+    c = this.came[key(c)];
   }
-  clone(){
-    const b = new Branch(this.cell, this.path, this.cameFrom);
-    b.bestEver = this.bestEver;
-    b.parkCount = 0;
-    b.stack = this.stack.map(s => ({
+  p.reverse();
+  this.path = p;
+};
+
+AStar.prototype.sizeOf = function(obj){
+  var n = 0;
+  for(var k in obj) if(obj[k]) n++;
+  return n;
+};
+
+// ---- LSB ----
+function Branch(cell, path, cameFrom){
+  this.cell = cell;
+  this.path = path.slice();
+  this.cameFrom = cameFrom;
+  this.pathSet = {};
+  for(var i=0; i<this.path.length; i++) this.pathSet[key(this.path[i])] = true;
+  this.stack = [];
+  this.bestEver = manhattan(cell, GOAL);
+  this.parkCount = 0;
+  this.parked = false;
+}
+Branch.prototype.clone = function(){
+  var b = new Branch(this.cell, this.path, this.cameFrom);
+  b.bestEver = this.bestEver;
+  b.parkCount = 0;
+  b.stack = [];
+  for(var i=0; i<this.stack.length; i++){
+    var s = this.stack[i];
+    b.stack.push({
       cell: s.cell,
       options: s.options.slice(),
       nextIdx: s.nextIdx,
       pathIdx: s.pathIdx
-    }));
-    return b;
+    });
   }
-  score(){ return euclid(this.cell, GOAL) + 0.25 * this.path.length; }
+  return b;
+};
+Branch.prototype.score = function(){
+  return euclid(this.cell, GOAL) + 0.25 * this.path.length;
+};
+
+function LSB(g, start, goal){
+  this.grid = g;
+  this.start = start;
+  this.goal = goal;
+
+  this.max_branches      = 32;
+  this.max_parked        = 128;
+  this.scar_threshold    = 2.5;
+  this.scar_decay        = 0.004;
+  this.tryEps            = 0.5;
+  this.maxParksPerBranch = 5;
+  this.minActive         = 8;
+  this.stallThreshold    = 500;
+
+  this.scar = {};
+  var b = new Branch(start, [start], null);
+  this.branches = [b];
+  this.parked = [];
+  this.done = false;
+  this.exhausted = false;
+  this.path = null;
+  this.tick = 0;
+  this.lastNovelTick = 0;
+  this.backtracks = 0;
+  this.parks = 0;
+  this.resumes = 0;
+  this.kills = 0;
+
+  this.visited = {};
+  this.generated = {};
+  this.expanded = {};
+  this.frontier = {};
+  this.dead = {};
+  this.visited[key(start)] = true;
+  this.generated[key(start)] = true;
+  this.frontier[key(start)] = true;
+  this.algMs = 0;
 }
 
-class LSB {
-  constructor(grid, start, goal, opts={}){
-    this.grid=grid; this.start=start; this.goal=goal;
-    // scaled up for the larger maze
-    this.max_branches        = opts.max_branches        ?? 32;
-    this.max_parked          = opts.max_parked          ?? 128;
-    this.scar_threshold      = opts.scar_threshold      ?? 2.5;
-    this.scar_decay          = opts.scar_decay          ?? 0.004;
-    this.tryEps              = opts.tryEps              ?? 0.5;
-    this.maxParksPerBranch   = opts.maxParksPerBranch   ?? 5;
-    this.minActive           = opts.minActive           ?? 8;
-    this.stallThreshold      = opts.stallThreshold      ?? 500;
+LSB.prototype._scarAdd = function(c, amt){
+  var k = key(c);
+  this.scar[k] = (this.scar[k] || 0) + amt;
+};
 
-    this.scar = new Map();
-    const b = new Branch(start, [start], null);
-    this.branches = [b];
-    this.parked = [];
-    this.done=false; this.exhausted=false; this.path=null;
-    this.tick=0;
-    this.lastNovelTick = 0;
-    this.backtracks=0; this.parks=0; this.resumes=0; this.kills=0;
+LSB.prototype.step = function(budget){
+  var t0 = performance.now();
+  var self = this;
+  var stop = false;
+  for(var i=0; i<budget && !this.done; i++){
+    if(this.branches.length === 0){
+      if(this.parked.length === 0){
+        this.done = true;
+        this.exhausted = true;
+        break;
+      }
+      this._unpark(this.minActive);
+    }
+    this.tick++;
+    var novelBefore = countKeys(this.visited);
 
-    this.visited   = new Set([key(start)]);
-    this.generated = new Set([key(start)]);
-    this.expanded  = new Set();
+    var next = [];
+    for(var bi=0; bi<this.branches.length; bi++){
+      this.stepBranch(this.branches[bi], next);
+      if(this.done){ stop = true; break; }
+    }
+    if(stop) break;
 
-    this.frontier = new Set([key(start)]);
-    this.dead = new Set();
-    this.algMs = 0;
-  }
-  _scarAdd(c, amt){ this.scar.set(key(c), (this.scar.get(key(c))||0)+amt); }
-
-  step(budget){
-    const t0 = performance.now();
-    outer:
-    for(let i=0; i<budget && !this.done; i++){
-      if(this.branches.length === 0){
-        if(this.parked.length === 0){
-          this.done = true; this.exhausted = true; break;
+    next.sort(function(a,b){ return a.score() - b.score(); });
+    var keep = next.slice(0, this.max_branches);
+    var overflow = next.slice(this.max_branches);
+    this.branches = keep;
+    for(var oi=0; oi<overflow.length; oi++){
+      var ob = overflow[oi];
+      if(this.parked.length < this.max_parked){
+        ob.parked = true;
+        this.parked.push(ob);
+        this.parks++;
+      } else {
+        for(var pc=0; pc<ob.path.length; pc++){
+          this._scarAdd(ob.path[pc], 0.5);
+          this.dead[key(ob.path[pc])] = true;
         }
-        this._unpark(this.minActive);
-      }
-      this.tick++;
-      const novelBefore = this.visited.size;
-
-      const next = [];
-      for(const b of this.branches){
-        this.stepBranch(b, next);
-        if(this.done) break outer;
-      }
-
-      next.sort((a,b) => a.score() - b.score());
-      const keep = next.slice(0, this.max_branches);
-      const overflow = next.slice(this.max_branches);
-      this.branches = keep;
-      for(const b of overflow){
-        if(this.parked.length < this.max_parked){
-          b.parked = true; this.parked.push(b); this.parks++;
-        } else {
-          const worstParked = this.parked[this.parked.length - 1];
-          if(worstParked && b.score() < worstParked.score()){
-            this.parked.pop();
-            for(const c of worstParked.path){ this._scarAdd(c, 0.5); this.dead.add(key(c)); }
-            this.kills++;
-            b.parked = true; this.parked.push(b); this.parks++;
-          } else {
-            for(const c of b.path){ this._scarAdd(c, 0.5); this.dead.add(key(c)); }
-            this.kills++;
-          }
-        }
-      }
-      this.frontier = new Set(this.branches.map(b => key(b.cell)));
-
-      const novelAfter = this.visited.size;
-      if(novelAfter > novelBefore){
-        this.lastNovelTick = this.tick;
-      } else if(this.tick - this.lastNovelTick > this.stallThreshold && this.parked.length > 0){
-        this._unpark(4);
-        this.lastNovelTick = this.tick;
-      }
-
-      if(this.scar_decay>0 && this.tick%60===0){
-        for(const k of Array.from(this.scar.keys())){
-          const v = this.scar.get(k)*(1-this.scar_decay);
-          if(v<0.05) this.scar.delete(k); else this.scar.set(k,v);
-        }
+        this.kills++;
       }
     }
-    this.algMs += performance.now() - t0;
-  }
 
-  _unpark(n){
-    this.parked.sort((a,b) => a.score() - b.score());
-    const take = Math.min(n, this.parked.length);
-    for(let j=0; j<take; j++){
-      const b = this.parked.shift();
-      b.parked = false;
-      this.branches.push(b);
-      this.resumes++;
+    this.frontier = {};
+    for(var fi=0; fi<this.branches.length; fi++){
+      this.frontier[key(this.branches[fi].cell)] = true;
+    }
+
+    var novelAfter = countKeys(this.visited);
+    if(novelAfter > novelBefore){
+      this.lastNovelTick = this.tick;
+    } else if(this.tick - this.lastNovelTick > this.stallThreshold && this.parked.length > 0){
+      this._unpark(4);
+      this.lastNovelTick = this.tick;
+    }
+
+    if(this.scar_decay > 0 && this.tick % 60 === 0){
+      for(var sk in this.scar){
+        var v = this.scar[sk] * (1 - this.scar_decay);
+        if(v < 0.05) delete this.scar[sk];
+        else this.scar[sk] = v;
+      }
     }
   }
+  this.algMs += performance.now() - t0;
+};
 
-  _addGenerated(c){
-    const k = key(c);
-    if(!this.visited.has(k)){
-      this.visited.add(k);
-      this.generated.add(k);
-    }
+LSB.prototype._unpark = function(n){
+  this.parked.sort(function(a,b){ return a.score() - b.score(); });
+  var take = Math.min(n, this.parked.length);
+  for(var j=0; j<take; j++){
+    var b = this.parked.shift();
+    b.parked = false;
+    this.branches.push(b);
+    this.resumes++;
+  }
+};
+
+LSB.prototype._addGenerated = function(c){
+  var k = key(c);
+  if(!this.visited[k]){
+    this.visited[k] = true;
+    this.generated[k] = true;
+  }
+};
+
+LSB.prototype.stepBranch = function(b, next){
+  if(b.cell[0] === this.goal[0] && b.cell[1] === this.goal[1]){
+    this.done = true;
+    this.path = b.path;
+    return;
   }
 
-  stepBranch(b, next){
-    if(b.cell[0]===this.goal[0] && b.cell[1]===this.goal[1]){
-      this.done=true; this.path=b.path; return;
+  this.expanded[key(b.cell)] = true;
+
+  var rawOpts = neighbors(this.grid, b.cell);
+  var opts = [];
+  for(var i=0; i<rawOpts.length; i++){
+    if(!b.pathSet[key(rawOpts[i])]) opts.push(rawOpts[i]);
+  }
+
+  if(opts.length === 0){
+    var dead = this.backtrack(b, next);
+    if(dead) return;
+    next.push(b);
+    return;
+  }
+
+  var self = this;
+  opts.sort(function(p,q){ return euclid(p, self.goal) - euclid(q, self.goal); });
+  var primary = opts[0];
+
+  if(opts.length > 1){
+    var bestD = euclid(primary, this.goal);
+    var tied = [];
+    for(var ti=0; ti<opts.length; ti++){
+      if(Math.abs(euclid(opts[ti], this.goal) - bestD) < this.tryEps) tied.push(opts[ti]);
     }
-    this.expanded.add(key(b.cell));
-    const opts = neighbors(this.grid, b.cell).filter(n => !b.pathSet.has(key(n)));
-    if(opts.length === 0){
-      const dead = this.backtrack(b, next);
-      if(dead) return;
-      next.push(b);
-      return;
-    }
-    opts.sort((p,q) => euclid(p, this.goal) - euclid(q, this.goal));
-    const primary = opts[0];
-    if(opts.length > 1){
-      const bestD = euclid(primary, this.goal);
-      const tied = opts.filter(o => Math.abs(euclid(o, this.goal) - bestD) < this.tryEps);
-      if(tied.length > 1){
-        for(let i=1; i<tied.length; i++){
-          const nb = b.clone();
-          const nt = tied[i];
-          nb.stack.push({
-            cell: b.cell,
-            options: opts.slice(),
-            nextIdx: tied.length,
-            pathIdx: b.path.length - 1
-          });
-          nb.path.push(nt);
-          nb.pathSet.add(key(nt));
-          nb.cameFrom = b.cell;
-          nb.cell = nt;
-          nb.bestEver = Math.min(nb.bestEver, manhattan(nt, this.goal));
-          this._addGenerated(nt);
-          next.push(nb);
-        }
-        b.stack.push({
+    if(tied.length > 1){
+      for(var k=1; k<tied.length; k++){
+        var nb = b.clone();
+        var nt = tied[k];
+        nb.stack.push({
           cell: b.cell,
           options: opts.slice(),
           nextIdx: tied.length,
           pathIdx: b.path.length - 1
         });
-      } else {
-        b.stack.push({
-          cell: b.cell,
-          options: opts.slice(),
-          nextIdx: 1,
-          pathIdx: b.path.length - 1
-        });
-      }
-    }
-    b.path.push(primary);
-    b.pathSet.add(key(primary));
-    b.cameFrom = b.cell;
-    b.cell = primary;
-    this._addGenerated(primary);
-    const d = manhattan(primary, this.goal);
-    if(d < b.bestEver) b.bestEver = d;
-    if(primary[0]===this.goal[0] && primary[1]===this.goal[1]){
-      this.done=true; this.path=b.path; return;
-    }
-    if(b.parkCount < this.maxParksPerBranch && this._shouldPark(b)){
-      b.parkCount++;
-      if(this.parked.length < this.max_parked){
-        b.parked = true;
-        this.parked.push(b);
-        this.parks++;
-        return;
-      }
-    }
-    next.push(b);
-  }
-
-  _shouldPark(b){
-    if(this.branches.length <= this.minActive) return false;
-    const scored = this.branches.map(x => x.score()).sort((a,b)=>a-b);
-    const median = scored[Math.floor(scored.length/2)];
-    return b.score() > median * 1.5;
-  }
-
-  backtrack(b, next){
-    this.backtracks++;
-    while(b.stack.length > 0){
-      const top = b.stack[b.stack.length - 1];
-      if(top.nextIdx < top.options.length){
-        const nt = top.options[top.nextIdx];
-        top.nextIdx++;
-        for(let i = b.path.length - 1; i > top.pathIdx; i--){
-          b.pathSet.delete(key(b.path[i]));
-        }
-        b.path = b.path.slice(0, top.pathIdx + 1);
-        b.path.push(nt);
-        b.pathSet.add(key(nt));
-        b.cameFrom = top.cell;
-        b.cell = nt;
+        nb.path.push(nt);
+        nb.pathSet[key(nt)] = true;
+        nb.cameFrom = b.cell;
+        nb.cell = nt;
+        nb.bestEver = Math.min(nb.bestEver, manhattan(nt, this.goal));
         this._addGenerated(nt);
-        const d = manhattan(nt, this.goal);
-        if(d < b.bestEver) b.bestEver = d;
-        if(nt[0]===this.goal[0] && nt[1]===this.goal[1]){
-          this.done=true; this.path=b.path; return false;
-        }
+        next.push(nb);
+      }
+      b.stack.push({
+        cell: b.cell,
+        options: opts.slice(),
+        nextIdx: tied.length,
+        pathIdx: b.path.length - 1
+      });
+    } else {
+      b.stack.push({
+        cell: b.cell,
+        options: opts.slice(),
+        nextIdx: 1,
+        pathIdx: b.path.length - 1
+      });
+    }
+  }
+
+  b.path.push(primary);
+  b.pathSet[key(primary)] = true;
+  b.cameFrom = b.cell;
+  b.cell = primary;
+  this._addGenerated(primary);
+  var d = manhattan(primary, this.goal);
+  if(d < b.bestEver) b.bestEver = d;
+
+  if(primary[0] === this.goal[0] && primary[1] === this.goal[1]){
+    this.done = true;
+    this.path = b.path;
+    return;
+  }
+
+  if(b.parkCount < this.maxParksPerBranch && this._shouldPark(b)){
+    b.parkCount++;
+    if(this.parked.length < this.max_parked){
+      b.parked = true;
+      this.parked.push(b);
+      this.parks++;
+      return;
+    }
+  }
+  next.push(b);
+};
+
+LSB.prototype._shouldPark = function(b){
+  if(this.branches.length <= this.minActive) return false;
+  var scored = [];
+  for(var i=0; i<this.branches.length; i++) scored.push(this.branches[i].score());
+  scored.sort(function(a,b){ return a-b; });
+  var median = scored[Math.floor(scored.length/2)];
+  return b.score() > median * 1.5;
+};
+
+LSB.prototype.backtrack = function(b, next){
+  this.backtracks++;
+  while(b.stack.length > 0){
+    var top = b.stack[b.stack.length - 1];
+    if(top.nextIdx < top.options.length){
+      var nt = top.options[top.nextIdx];
+      top.nextIdx++;
+      for(var i = b.path.length - 1; i > top.pathIdx; i--){
+        delete b.pathSet[key(b.path[i])];
+      }
+      b.path = b.path.slice(0, top.pathIdx + 1);
+      b.path.push(nt);
+      b.pathSet[key(nt)] = true;
+      b.cameFrom = top.cell;
+      b.cell = nt;
+      this._addGenerated(nt);
+      var d = manhattan(nt, this.goal);
+      if(d < b.bestEver) b.bestEver = d;
+      if(nt[0] === this.goal[0] && nt[1] === this.goal[1]){
+        this.done = true;
+        this.path = b.path;
         return false;
       }
-      b.stack.pop();
+      return false;
     }
-    for(const c of b.path){ this._scarAdd(c, 0.5); this.dead.add(key(c)); }
-    this.kills++;
-    return true;
+    b.stack.pop();
   }
+  for(var j=0; j<b.path.length; j++){
+    this._scarAdd(b.path[j], 0.5);
+    this.dead[key(b.path[j])] = true;
+  }
+  this.kills++;
+  return true;
+};
+
+function countKeys(obj){
+  var n = 0;
+  for(var k in obj) if(obj[k]) n++;
+  return n;
 }
 
-// ===================================================================
-// stats snapshot
-// ===================================================================
+// ---- stats ----
 function getStats(algo, isLSB){
-  const validPath = algo.path ? validatePath(algo.grid, algo.path, algo.start, algo.goal)
-                              : {ok:false, reason:'no path'};
+  var validPath = algo.path
+    ? validatePath(algo.grid, algo.path, algo.start, algo.goal)
+    : { ok:false, reason:'no path' };
   return {
-    expanded:  algo.expanded.size,
-    generated: algo.generated ? algo.generated.size : null,
-    uniqueVisited: algo.visited.size,
+    expanded: countKeys(algo.expanded),
+    generated: countKeys(algo.generated),
+    uniqueVisited: countKeys(algo.visited),
     pathLen: algo.path ? algo.path.length : null,
     pathValid: validPath.ok,
     pathReason: validPath.reason,
     success: algo.done && validPath.ok,
     exhausted: !!algo.exhausted,
     done: algo.done,
-    frontier: algo.frontier.size,
+    frontier: countKeys(algo.frontier),
     backtracks: isLSB ? algo.backtracks : null,
     parks: isLSB ? algo.parks : null,
     resumes: isLSB ? algo.resumes : null,
     kills: isLSB ? algo.kills : null,
     parkedCount: isLSB ? algo.parked.length : null,
     algMs: algo.algMs,
-    isLSB
+    isLSB: isLSB
   };
 }
 
-// ===================================================================
-// recording / playback
-// ===================================================================
+// ---- recording ----
 function recordFrames(algo, isLSB, maxTicks){
-  const frames = [];
-  const prevVisited  = new Set();
-  const prevFrontier = new Set();
-  const prevDead     = new Set();
+  var frames = [];
+  var prevVisited = {};
+  var prevFrontier = {};
+  var prevDead = {};
 
   frames.push({
-    addVisited: Array.from(algo.visited),
-    addFrontier: Array.from(algo.frontier),
+    addVisited: keysOf(algo.visited),
+    addFrontier: keysOf(algo.frontier),
     remFrontier: [],
-    addDead: algo.dead ? Array.from(algo.dead) : [],
+    addDead: algo.dead ? keysOf(algo.dead) : [],
     path: algo.path ? algo.path.slice() : null,
-    parked: isLSB && algo.parked ? algo.parked.map(b => key(b.cell)) : null,
+    parked: isLSB && algo.parked ? algo.parked.map(function(b){ return key(b.cell); }) : null,
     stats: getStats(algo, isLSB)
   });
-  for(const k of algo.visited) prevVisited.add(k);
-  for(const k of algo.frontier) prevFrontier.add(k);
-  if(algo.dead) for(const k of algo.dead) prevDead.add(k);
+  var k;
+  for(k in algo.visited) if(algo.visited[k]) prevVisited[k] = true;
+  for(k in algo.frontier) if(algo.frontier[k]) prevFrontier[k] = true;
+  if(algo.dead) for(k in algo.dead) if(algo.dead[k]) prevDead[k] = true;
 
-  let tick = 0;
+  var tick = 0;
   while(!algo.done && tick < maxTicks){
     algo.step(BUDGET_PER_TICK);
     tick++;
 
-    const addVisited = [];
-    for(const k of algo.visited) if(!prevVisited.has(k)){ addVisited.push(k); prevVisited.add(k); }
-    const addFrontier = [];
-    for(const k of algo.frontier) if(!prevFrontier.has(k)){ addFrontier.push(k); prevFrontier.add(k); }
-    const remFrontier = [];
-    for(const k of prevFrontier) if(!algo.frontier.has(k)) remFrontier.push(k);
-    for(const k of remFrontier) prevFrontier.delete(k);
-    const addDead = [];
+    var addVisited = [];
+    for(k in algo.visited) if(algo.visited[k] && !prevVisited[k]){ addVisited.push(parseInt(k,10)); prevVisited[k] = true; }
+    var addFrontier = [];
+    for(k in algo.frontier) if(algo.frontier[k] && !prevFrontier[k]){ addFrontier.push(parseInt(k,10)); prevFrontier[k] = true; }
+    var remFrontier = [];
+    for(k in prevFrontier) if(prevFrontier[k] && !algo.frontier[k]) remFrontier.push(parseInt(k,10));
+    for(var ri=0; ri<remFrontier.length; ri++) delete prevFrontier[remFrontier[ri]];
+    var addDead = [];
     if(algo.dead){
-      for(const k of algo.dead) if(!prevDead.has(k)){ addDead.push(k); prevDead.add(k); }
+      for(k in algo.dead) if(algo.dead[k] && !prevDead[k]){ addDead.push(parseInt(k,10)); prevDead[k] = true; }
     }
     frames.push({
-      addVisited, addFrontier, remFrontier, addDead,
+      addVisited: addVisited,
+      addFrontier: addFrontier,
+      remFrontier: remFrontier,
+      addDead: addDead,
       path: algo.path ? algo.path.slice() : null,
-      parked: isLSB && algo.parked ? algo.parked.map(b => key(b.cell)) : null,
+      parked: isLSB && algo.parked ? algo.parked.map(function(b){ return key(b.cell); }) : null,
       stats: getStats(algo, isLSB)
     });
   }
   return frames;
 }
 
-function buildRecording(){
-  const a = new AStar(grid, START, GOAL);
-  const l = new LSB(grid, START, GOAL);
-  const framesA = recordFrames(a, false, RECORD_MAX_TICKS);
-  const framesL = recordFrames(l, true,  RECORD_MAX_TICKS);
-  const ticks = Math.max(framesA.length, framesL.length);
+function keysOf(obj){
+  var out = [];
+  for(var k in obj) if(obj[k]) out.push(parseInt(k,10));
+  return out;
+}
 
-  const idleA = framesA[framesA.length-1];
-  while(framesA.length < ticks)
+function buildRecording(){
+  var a = new AStar(grid, START, GOAL);
+  var l = new LSB(grid, START, GOAL);
+  var framesA = recordFrames(a, false, RECORD_MAX_TICKS);
+  var framesL = recordFrames(l, true, RECORD_MAX_TICKS);
+  var ticks = Math.max(framesA.length, framesL.length);
+
+  var idleA = framesA[framesA.length-1];
+  while(framesA.length < ticks){
     framesA.push({ addVisited:[], addFrontier:[], remFrontier:[], addDead:[],
                    path: idleA.path, parked: idleA.parked, stats: idleA.stats });
-  const idleL = framesL[framesL.length-1];
-  while(framesL.length < ticks)
+  }
+  var idleL = framesL[framesL.length-1];
+  while(framesL.length < ticks){
     framesL.push({ addVisited:[], addFrontier:[], remFrontier:[], addDead:[],
                    path: idleL.path, parked: idleL.parked, stats: idleL.stats });
-  return { framesA, framesL, ticks, grid, START, GOAL };
+  }
+  return { framesA: framesA, framesL: framesL, ticks: ticks, grid: grid, START: START, GOAL: GOAL };
 }
 
-// ===================================================================
-// playback
-// ===================================================================
-let recording = null;
-let playbackIdx = -1;
-let paused = false;
-let finished = false;
-let lastFrameTime = 0;
-let tickAccumulator = 0;
+// ---- playback ----
+var recording = null;
+var playbackIdx = -1;
+var paused = false;
+var finished = false;
+var lastFrameTime = 0;
+var tickAccumulator = 0;
 
-const playbackA = { visited: new Set(), frontier: new Set(), dead: new Set() };
-const playbackL = { visited: new Set(), frontier: new Set(), dead: new Set() };
-let currentA = { path: null, parked: null, stats: null };
-let currentL = { path: null, parked: null, stats: null };
+var playbackA = { visited:{}, frontier:{}, dead:{} };
+var playbackL = { visited:{}, frontier:{}, dead:{} };
+var currentA = { path:null, parked:null, stats:null };
+var currentL = { path:null, parked:null, stats:null };
 
 function applyFrame(state, frame){
-  for(const k of frame.addVisited) state.visited.add(k);
-  for(const k of frame.addFrontier) state.frontier.add(k);
-  for(const k of frame.remFrontier) state.frontier.delete(k);
-  for(const k of frame.addDead) state.dead.add(k);
+  for(var i=0; i<frame.addVisited.length; i++) state.visited[frame.addVisited[i]] = true;
+  for(var j=0; j<frame.addFrontier.length; j++) state.frontier[frame.addFrontier[j]] = true;
+  for(var k=0; k<frame.remFrontier.length; k++) delete state.frontier[frame.remFrontier[k]];
+  for(var m=0; m<frame.addDead.length; m++) state.dead[frame.addDead[m]] = true;
 }
+
 function advanceToFrame(target){
   if(target <= playbackIdx) return;
   while(playbackIdx < target){
     playbackIdx++;
-    const fa = recording.framesA[playbackIdx];
-    const fl = recording.framesL[playbackIdx];
+    var fa = recording.framesA[playbackIdx];
+    var fl = recording.framesL[playbackIdx];
     applyFrame(playbackA, fa);
     applyFrame(playbackL, fl);
-    currentA.path = fa.path; currentA.parked = fa.parked; currentA.stats = fa.stats;
-    currentL.path = fl.path; currentL.parked = fl.parked; currentL.stats = fl.stats;
+    currentA.path = fa.path;
+    currentA.parked = fa.parked;
+    currentA.stats = fa.stats;
+    currentL.path = fl.path;
+    currentL.parked = fl.parked;
+    currentL.stats = fl.stats;
   }
 }
+
 function resetPlayback(){
   playbackIdx = -1;
   tickAccumulator = 0;
-  playbackA.visited.clear(); playbackA.frontier.clear(); playbackA.dead.clear();
-  playbackL.visited.clear(); playbackL.frontier.clear(); playbackL.dead.clear();
-  currentA = { path: null, parked: null, stats: null };
-  currentL = { path: null, parked: null, stats: null };
+  playbackA = { visited:{}, frontier:{}, dead:{} };
+  playbackL = { visited:{}, frontier:{}, dead:{} };
+  currentA = { path:null, parked:null, stats:null };
+  currentL = { path:null, parked:null, stats:null };
   advanceToFrame(0);
 }
 
-// ===================================================================
-// rendering
-// ===================================================================
-const cA = document.getElementById('cA');
-const cL = document.getElementById('cL');
-cA.width = W*CELL; cA.height = H*CELL;
-cL.width = W*CELL; cL.height = H*CELL;
-const ctxA = cA.getContext('2d');
-const ctxL = cL.getContext('2d');
+// ---- rendering ----
+var cA = document.getElementById('cA');
+var cL = document.getElementById('cL');
+cA.width = W * CELL;
+cA.height = H * CELL;
+cL.width = W * CELL;
+cL.height = H * CELL;
+var ctxA = cA.getContext('2d');
+var ctxL = cL.getContext('2d');
 
-const COLOR = {
-  wall:'#555', open:'#000', start:'#0a0', goal:'#c0c',
-  frontier:'#ff0', parked:'#f80', visited:'#2a4a7a', path:'#0ff', dead:'#a00'
+var COLOR = {
+  wall: '#555', open: '#000', start: '#0a0', goal: '#c0c',
+  frontier: '#ff0', parked: '#f80', visited: '#2a4a7a', path: '#0ff', dead: '#a00'
 };
 
-function draw(ctx, grid, view, path, parked){
+function draw(ctx, g, view, path, parked){
   ctx.fillStyle = COLOR.open;
-  ctx.fillRect(0,0,ctx.canvas.width,ctx.canvas.height);
-  const pathSet = path ? new Set(path.map(key)) : null;
-  const parkedSet = parked ? new Set(parked) : null;
-  for(let y=0;y<H;y++){
-    for(let x=0;x<W;x++){
-      const k = y*W+x;
-      let col = null;
-      if(grid[y][x]===1) col = COLOR.wall;
-      else if(view.dead.has(k)) col = COLOR.dead;
-      else if(view.visited.has(k)) col = COLOR.visited;
-      if(parkedSet && parkedSet.has(k)) col = COLOR.parked;
-      if(view.frontier.has(k)) col = COLOR.frontier;
-      if(pathSet && pathSet.has(k)) col = COLOR.path;
-      if(x===START[0]&&y===START[1]) col = COLOR.start;
-      if(x===GOAL[0]&&y===GOAL[1]) col = COLOR.goal;
-      if(col){ ctx.fillStyle=col; ctx.fillRect(x*CELL,y*CELL,CELL,CELL); }
+  ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+  var pathSet = {};
+  if(path){ for(var pi=0; pi<path.length; pi++) pathSet[key(path[pi])] = true; }
+  var parkedSet = {};
+  if(parked){ for(var qi=0; qi<parked.length; qi++) parkedSet[parked[qi]] = true; }
+  for(var y=0; y<H; y++){
+    for(var x=0; x<W; x++){
+      var k = y*W + x;
+      var col = null;
+      if(g[y][x] === 1) col = COLOR.wall;
+      else if(view.dead[k]) col = COLOR.dead;
+      else if(view.visited[k]) col = COLOR.visited;
+      if(parkedSet[k]) col = COLOR.parked;
+      if(view.frontier[k]) col = COLOR.frontier;
+      if(pathSet[k]) col = COLOR.path;
+      if(x === START[0] && y === START[1]) col = COLOR.start;
+      if(x === GOAL[0] && y === GOAL[1]) col = COLOR.goal;
+      if(col){ ctx.fillStyle = col; ctx.fillRect(x*CELL, y*CELL, CELL, CELL); }
     }
   }
 }
 
 function fmtStats(stats){
   if(!stats) return '';
-  let s = `<div class="primary">expanded: <b>${stats.expanded}</b></div>`;
-  if(stats.generated !== null) s += `generated: <b>${stats.generated}</b><br>`;
-  s += `path: <b>${stats.pathLen ?? '—'}</b>`;
-  if(stats.done) s += stats.pathValid ? ` <span style="color:#6f6">✓</span>` : ` <span style="color:#f88">✗</span>`;
-  s += `<br>frontier: <b>${stats.frontier}</b><br>`;
+  var s = 'expanded: <b>' + stats.expanded + '</b><br>';
+  if(stats.generated !== null) s += 'generated: <b>' + stats.generated + '</b><br>';
+  s += 'path: <b>' + (stats.pathLen !== null ? stats.pathLen : '-') + '</b>';
+  if(stats.done) s += stats.pathValid ? ' <span style="color:#6f6">valid</span>' : ' <span style="color:#f88">invalid</span>';
+  s += '<br>frontier: <b>' + stats.frontier + '</b><br>';
   if(stats.isLSB){
-    s += `bt: <b>${stats.backtracks}</b>  parks: <b>${stats.parks}</b>  res: <b>${stats.resumes}</b><br>`;
-    s += `kills: <b>${stats.kills}</b>  parked: <b>${stats.parkedCount}</b><br>`;
+    s += 'bt: <b>' + stats.backtracks + '</b>  parks: <b>' + stats.parks + '</b>  res: <b>' + stats.resumes + '</b><br>';
+    s += 'kills: <b>' + stats.kills + '</b>  parked: <b>' + stats.parkedCount + '</b><br>';
   }
-  s += `done: <b>${stats.done}</b>`;
-  if(stats.exhausted) s += ` <span style="color:#f88">(exhausted)</span>`;
-  if(stats.done) s += `  success: <b>${stats.success ? 'yes' : 'NO'}</b>`;
-  s += `<br>alg time: <b>${fmtTime(stats.algMs)}</b>`;
+  s += 'done: <b>' + stats.done + '</b>';
+  if(stats.exhausted) s += ' <span style="color:#f88">(exhausted)</span>';
+  if(stats.done) s += '  success: <b>' + (stats.success ? 'yes' : 'NO') + '</b>';
+  s += '<br>alg time: <b>' + fmtTime(stats.algMs) + '</b>';
   return s;
 }
 
@@ -789,57 +968,56 @@ function renderCurrent(){
   document.getElementById('sL').innerHTML = fmtStats(currentL.stats);
 }
 
-// ===================================================================
-// speed control
-// ===================================================================
+// ---- speed ----
 function setSpeed(s){
   PLAYBACK_SPEED = s;
-  document.querySelectorAll('.speed-btn').forEach(btn => {
-    const v = parseFloat(btn.dataset.sp);
-    btn.classList.toggle('speed-on', Math.abs(v - s) < 1e-6);
-  });
+  var btns = document.querySelectorAll('.speed-btn');
+  for(var i=0; i<btns.length; i++){
+    var v = parseFloat(btns[i].getAttribute('data-sp'));
+    if(Math.abs(v - s) < 1e-6) btns[i].className = 'speed-btn speed-on';
+    else btns[i].className = 'speed-btn';
+  }
 }
 
-// ===================================================================
-// driver
-// ===================================================================
-let grid = null;
-
+// ---- driver ----
 function setScenario(name){
-  if(name==='open'){        START=[0,0]; GOAL=[W-1,H-1]; grid = makeOpen(); }
-  else if(name==='sparse'){ START=[0,0]; GOAL=[W-1,H-1]; grid = makeSparse(); }
-  else if(name==='r020'){   START=[0,0]; GOAL=[W-1,H-1]; grid = makeRandom(0.20, freshSeed()); }
-  else if(name==='r030'){   START=[0,0]; GOAL=[W-1,H-1]; grid = makeRandom(0.30, freshSeed()); }
-  else if(name==='r038'){   START=[0,0]; GOAL=[W-1,H-1]; grid = makeRandom(0.38, freshSeed()); }
-  else if(name==='maze_dfs'){     grid = makeMazeDFS(freshSeed());     START=[1,1]; GOAL=[W-3,H-3]; }
-  else if(name==='maze_prim'){    grid = makeMazePrim(freshSeed());    START=[1,1]; GOAL=[W-3,H-3]; }
-  else if(name==='maze_kruskal'){ grid = makeMazeKruskal(freshSeed()); START=[1,1]; GOAL=[W-3,H-3]; }
-  else if(name==='maze_any'){
-    const t = MAZE_TYPES[Math.floor(Math.random()*MAZE_TYPES.length)];
+  if(name === 'open'){        START = [0,0]; GOAL = [W-1,H-1]; grid = makeOpen(); }
+  else if(name === 'sparse'){ START = [0,0]; GOAL = [W-1,H-1]; grid = makeSparse(); }
+  else if(name === 'r020'){   START = [0,0]; GOAL = [W-1,H-1]; grid = makeRandom(0.20, freshSeed()); }
+  else if(name === 'r030'){   START = [0,0]; GOAL = [W-1,H-1]; grid = makeRandom(0.30, freshSeed()); }
+  else if(name === 'r038'){   START = [0,0]; GOAL = [W-1,H-1]; grid = makeRandom(0.38, freshSeed()); }
+  else if(name === 'maze_dfs'){     grid = makeMazeDFS(freshSeed());     START = [1,1]; GOAL = [W-3,H-3]; }
+  else if(name === 'maze_prim'){    grid = makeMazePrim(freshSeed());    START = [1,1]; GOAL = [W-3,H-3]; }
+  else if(name === 'maze_kruskal'){ grid = makeMazeKruskal(freshSeed()); START = [1,1]; GOAL = [W-3,H-3]; }
+  else if(name === 'maze_any'){
+    var t = MAZE_TYPES[Math.floor(Math.random() * MAZE_TYPES.length)];
     grid = t.fn(freshSeed());
-    START=[1,1]; GOAL=[W-3,H-3];
+    START = [1,1]; GOAL = [W-3,H-3];
   }
   buildAndPlay();
 }
+
 function restartSame(){ buildAndPlay(); }
 
 function buildAndPlay(){
-  const banner = document.getElementById('banner');
+  var banner = document.getElementById('banner');
   banner.style.display = 'block';
-  banner.textContent = 'Calculating…';
+  banner.textContent = 'Calculating...';
   document.getElementById('sA').innerHTML = '';
   document.getElementById('sL').innerHTML = '';
 
-  setTimeout(() => {
-    const t0 = performance.now();
+  setTimeout(function(){
+    var t0 = performance.now();
     recording = buildRecording();
-    const computeMs = performance.now() - t0;
+    var computeMs = performance.now() - t0;
     banner.textContent = 'Computed in ' + fmtTime(computeMs) +
-                         ' — playing back ' + recording.ticks + ' frames';
-    setTimeout(() => { banner.style.display = 'none'; }, 1500);
+                         ' - playing back ' + recording.ticks + ' frames';
+    setTimeout(function(){ banner.style.display = 'none'; }, 1500);
 
     resetPlayback();
-    paused = false; finished = false; lastFrameTime = 0;
+    paused = false;
+    finished = false;
+    lastFrameTime = 0;
     document.getElementById('pauseBtn').innerText = 'Pause';
     renderCurrent();
   }, 20);
@@ -857,7 +1035,7 @@ function loop(now){
   if(now - lastFrameTime < TICK_DELAY) return;
   lastFrameTime = now;
 
-  const lastIdx = recording.ticks - 1;
+  var lastIdx = recording.ticks - 1;
 
   if(PLAYBACK_SPEED >= 9999){
     advanceToFrame(lastIdx);
@@ -868,11 +1046,11 @@ function loop(now){
   }
 
   tickAccumulator += PLAYBACK_SPEED;
-  const advanceBy = Math.floor(tickAccumulator);
+  var advanceBy = Math.floor(tickAccumulator);
   if(advanceBy <= 0){ renderCurrent(); return; }
   tickAccumulator -= advanceBy;
 
-  const target = playbackIdx + advanceBy;
+  var target = playbackIdx + advanceBy;
   if(target >= lastIdx){
     advanceToFrame(lastIdx);
     renderCurrent();
@@ -884,30 +1062,33 @@ function loop(now){
   renderCurrent();
 }
 
-// ===================================================================
-// mass test  (with timing reps)
-// ===================================================================
-const MASS_N = 12;
-const MASS_MIN_TIME_MS = 5;
-const MASS_MAX_REPS = 30;
-let lastSeeds = null;
+// ---- mass test ----
+var MASS_N = 12;
+var MASS_MIN_TIME_MS = 5;
+var MASS_MAX_REPS = 30;
+var lastSeeds = null;
 
 function runOneOnce(factory, isLSB){
-  const algo = factory();
-  let iters = 0;
-  while(!algo.done && iters < MASS_MAX_ITERS){ algo.step(BUDGET_PER_TICK); iters++; }
-  const s = getStats(algo, isLSB);
+  var algo = factory();
+  var iters = 0;
+  while(!algo.done && iters < MASS_MAX_ITERS){
+    algo.step(BUDGET_PER_TICK);
+    iters++;
+  }
+  var s = getStats(algo, isLSB);
   return {
     stats: s,
     algMs: algo.algMs,
-    backtracks: s.backtracks, parks: s.parks,
-    resumes: s.resumes, kills: s.kills
+    backtracks: s.backtracks,
+    parks: s.parks,
+    resumes: s.resumes,
+    kills: s.kills
   };
 }
 
 function runBench(factory, isLSB){
-  let totalMs = 0, reps = 0;
-  let last = null;
+  var totalMs = 0, reps = 0;
+  var last = null;
   while(reps < MASS_MAX_REPS){
     last = runOneOnce(factory, isLSB);
     totalMs += last.algMs;
@@ -915,7 +1096,12 @@ function runBench(factory, isLSB){
     if(totalMs >= MASS_MIN_TIME_MS) break;
   }
   return {
-    ...last,
+    stats: last.stats,
+    algMs: last.algMs,
+    backtracks: last.backtracks,
+    parks: last.parks,
+    resumes: last.resumes,
+    kills: last.kills,
     avgMs: totalMs / reps,
     reps: reps,
     totalMs: totalMs
@@ -925,60 +1111,67 @@ function runBench(factory, isLSB){
 function massTest(reuse){
   paused = true;
   document.getElementById('pauseBtn').innerText = 'Resume';
-  const out = document.getElementById('results');
+  var out = document.getElementById('results');
   out.style.display = 'block';
-  out.textContent = 'Running ' + MASS_N + ' mazes (200×100, timing reps until stable)…';
+  out.textContent = 'Running ' + MASS_N + ' mazes...';
 
-  setTimeout(() => {
-    let plans;
-    if(reuse && lastSeeds){ plans = lastSeeds.slice(); }
-    else {
+  setTimeout(function(){
+    var plans;
+    if(reuse && lastSeeds){
+      plans = lastSeeds.slice();
+    } else {
       plans = [];
-      for(let i=0; i<MASS_N; i++){
-        const t = MAZE_TYPES[i % MAZE_TYPES.length];
+      for(var i=0; i<MASS_N; i++){
+        var t = MAZE_TYPES[i % MAZE_TYPES.length];
         plans.push({ type: t.name, fn: t.fn, seed: freshSeed() });
       }
       lastSeeds = plans;
     }
 
-    const rows = [];
-    let aSuccess=0, lSuccess=0;
-    let aWins=0, lWins=0, ties=0;
-    const acc = { aTime:0, lTime:0, aExp:0, lExp:0, aPath:0, lPath:0,
-                  lBT:0, lParks:0, lRes:0, lKills:0, n:0 };
+    var rows = [];
+    var aSuccess = 0, lSuccess = 0;
+    var aWins = 0, lWins = 0, ties = 0;
+    var acc = { aTime:0, lTime:0, aExp:0, lExp:0, aPath:0, lPath:0,
+                lBT:0, lParks:0, lRes:0, lKills:0, n:0 };
 
-    for(const plan of plans){
-      const g = plan.fn(plan.seed);
-      const S = [1,1], G = [W-3,H-3];
+    for(var pi=0; pi<plans.length; pi++){
+      var plan = plans[pi];
+      var g = plan.fn(plan.seed);
+      var S = [1,1], G = [W-3, H-3];
 
-      const ra = runBench(() => new AStar(g, S, G), false);
-      const rl = runBench(() => new LSB(g, S, G), true);
+      var ra = runBench(function(){ return new AStar(g, S, G); }, false);
+      var rl = runBench(function(){ return new LSB(g, S, G); }, true);
 
-      const aOk = ra.stats.success;
-      const lOk = rl.stats.success;
+      var aOk = ra.stats.success;
+      var lOk = rl.stats.success;
       if(aOk) aSuccess++;
       if(lOk) lSuccess++;
 
-      let verdict;
+      var verdict;
       if(!aOk && !lOk) verdict = 'both FAIL';
       else if(!lOk) verdict = 'A* (LSB fail)';
       else if(!aOk) verdict = 'LSB (A* fail)';
-      else if(ra.stats.expanded < rl.stats.expanded) verdict = 'A*';  aWins++;
-      else if(rl.stats.expanded < ra.stats.expanded) verdict = 'LSB'; lWins++;
+      else if(ra.stats.expanded < rl.stats.expanded){ verdict = 'A*'; aWins++; }
+      else if(rl.stats.expanded < ra.stats.expanded){ verdict = 'LSB'; lWins++; }
       else { verdict = 'tie'; ties++; }
 
       if(aOk && lOk){
-        acc.aTime += ra.avgMs; acc.lTime += rl.avgMs;
-        acc.aExp += ra.stats.expanded; acc.lExp += rl.stats.expanded;
-        acc.aPath += ra.stats.pathLen ?? 0; acc.lPath += rl.stats.pathLen ?? 0;
-        acc.lBT += rl.backtracks ?? 0;
-        acc.lParks += rl.parks ?? 0;
-        acc.lRes += rl.resumes ?? 0;
-        acc.lKills += rl.kills ?? 0;
+        acc.aTime += ra.avgMs;
+        acc.lTime += rl.avgMs;
+        acc.aExp += ra.stats.expanded;
+        acc.lExp += rl.stats.expanded;
+        acc.aPath += ra.stats.pathLen || 0;
+        acc.lPath += rl.stats.pathLen || 0;
+        acc.lBT += rl.backtracks || 0;
+        acc.lParks += rl.parks || 0;
+        acc.lRes += rl.resumes || 0;
+        acc.lKills += rl.kills || 0;
         acc.n++;
       }
+
       rows.push({
-        type: plan.type, seed: plan.seed,
+        type: plan.type,
+        seed: plan.seed,
         aTime: ra.avgMs, lTime: rl.avgMs,
         aReps: ra.reps, lReps: rl.reps,
         aExp: ra.stats.expanded, lExp: rl.stats.expanded,
@@ -987,59 +1180,59 @@ function massTest(reuse){
         lReason: rl.stats.pathReason,
         lBT: rl.backtracks, lParks: rl.parks,
         lRes: rl.resumes, lKills: rl.kills,
-        verdict
+        verdict: verdict
       });
     }
 
-    const pad = (s,n)=>{ s=String(s); while(s.length<n) s+=' '; return s.slice(0,n); };
-    const padL= (s,n)=>{ s=String(s); while(s.length<n) s=' '+s; return s.slice(-n); };
+    function pad(s, n){ s = String(s); while(s.length < n) s += ' '; return s.slice(0, n); }
+    function padL(s, n){ s = String(s); while(s.length < n) s = ' ' + s; return s.slice(-n); }
 
-    let txt = '';
-    txt += 'MASS TEST — ' + MASS_N + ' mazes (' + W + '×' + H + ')' +
+    var txt = '';
+    txt += 'MASS TEST - ' + MASS_N + ' mazes (' + W + 'x' + H + ')' +
            (reuse ? '  [reused seeds]' : '  [fresh seeds]') + '\n';
-    txt += 'Verdict by expanded-cells. Success requires validated path.\n';
-    txt += 'Timing averaged over multiple reps (until ≥' + MASS_MIN_TIME_MS + 'ms cumulative).\n\n';
-    txt += pad('type',9) + padL('seed',12) + padL('A*t',10) + padL('LSBt',10)
-         + padL('A*exp',7) + padL('LSBexp',8)
-         + padL('A*pth',7) + padL('LSBpth',8)
-         + padL('ok',4) + padL('rep',7)
-         + padL('LSBbt',8) + padL('park',6) + padL('res',5) + padL('kill',6)
+    txt += 'Verdict by expanded-cells. Success requires validated path.\n\n';
+    txt += pad('type', 9) + padL('seed', 12) + padL('A*t', 10) + padL('LSBt', 10)
+         + padL('A*exp', 8) + padL('LSBexp', 9)
+         + padL('A*pth', 7) + padL('LSBpth', 8)
+         + padL('ok', 4) + padL('rep', 7)
+         + padL('LSBbt', 8) + padL('park', 6) + padL('res', 5) + padL('kill', 6)
          + '  verdict\n';
-    txt += '─'.repeat(9+12+10+10+7+8+7+8+4+7+8+6+5+6+12) + '\n';
-    for(const r of rows){
+    txt += '------------------------------------------------------------------------------------\n';
+    for(var ri=0; ri<rows.length; ri++){
+      var r = rows[ri];
       txt += pad(r.type, 9)
           + padL(r.seed.toString(16), 12)
           + padL(fmtTime(r.aTime), 10)
           + padL(fmtTime(r.lTime), 10)
-          + padL(r.aExp, 7)
-          + padL(r.lExp, 8)
-          + padL(r.aPath ?? '—', 7)
-          + padL(r.lPath ?? '—', 8)
-          + padL(r.aSuccess && r.lSuccess ? 'Y/Y' : (r.aSuccess?'Y/N':'N/N'), 4)
+          + padL(r.aExp, 8)
+          + padL(r.lExp, 9)
+          + padL(r.aPath === null ? '-' : r.aPath, 7)
+          + padL(r.lPath === null ? '-' : r.lPath, 8)
+          + padL(r.aSuccess && r.lSuccess ? 'Y/Y' : (r.aSuccess ? 'Y/N' : 'N/N'), 4)
           + padL(r.aReps + '/' + r.lReps, 7)
-          + padL(r.lBT ?? '—', 8)
-          + padL(r.lParks ?? '—', 6)
-          + padL(r.lRes ?? '—', 5)
-          + padL(r.lKills ?? '—', 6)
+          + padL(r.lBT === null ? '-' : r.lBT, 8)
+          + padL(r.lParks === null ? '-' : r.lParks, 6)
+          + padL(r.lRes === null ? '-' : r.lRes, 5)
+          + padL(r.lKills === null ? '-' : r.lKills, 6)
           + '  ' + r.verdict + '\n';
       if(!r.lSuccess && r.lReason && r.lReason !== 'no path'){
-        txt += '  ↳ LSB path invalid: ' + r.lReason + '\n';
+        txt += '  LSB path invalid: ' + r.lReason + '\n';
       }
     }
-    txt += '─'.repeat(9+12+10+10+7+8+7+8+4+7+8+6+5+6+12) + '\n';
+    txt += '------------------------------------------------------------------------------------\n';
     if(acc.n > 0){
       txt += pad('AVG', 9) + padL('', 12)
           + padL(fmtTime(acc.aTime/acc.n), 10)
           + padL(fmtTime(acc.lTime/acc.n), 10)
-          + padL((acc.aExp/acc.n).toFixed(0), 7)
-          + padL((acc.lExp/acc.n).toFixed(0), 8)
-          + padL((acc.aPath/acc.n).toFixed(0), 7)
-          + padL((acc.lPath/acc.n).toFixed(0), 8)
+          + padL(Math.round(acc.aExp/acc.n), 8)
+          + padL(Math.round(acc.lExp/acc.n), 9)
+          + padL(Math.round(acc.aPath/acc.n), 7)
+          + padL(Math.round(acc.lPath/acc.n), 8)
           + padL('', 4) + padL('', 7)
-          + padL((acc.lBT/acc.n).toFixed(0), 8)
-          + padL((acc.lParks/acc.n).toFixed(0), 6)
-          + padL((acc.lRes/acc.n).toFixed(0), 5)
-          + padL((acc.lKills/acc.n).toFixed(0), 6)
+          + padL(Math.round(acc.lBT/acc.n), 8)
+          + padL(Math.round(acc.lParks/acc.n), 6)
+          + padL(Math.round(acc.lRes/acc.n), 5)
+          + padL(Math.round(acc.lKills/acc.n), 6)
           + '  (n=' + acc.n + ')\n';
     }
     txt += '\nSUCCESS  A*: ' + aSuccess + '/' + MASS_N
@@ -1047,15 +1240,25 @@ function massTest(reuse){
     txt += 'WINS  A*: ' + aWins + '   LSB: ' + lWins + '   tie: ' + ties + '\n\n';
 
     txt += 'Per-type breakdown (both solved):\n';
-    for(const t of MAZE_TYPES){
-      const sub = rows.filter(r => r.type === t.name && r.aSuccess && r.lSuccess);
-      if(sub.length === 0){ txt += '  ' + pad(t.name, 9) + '  (none)\n'; continue; }
-      const aAvg = (sub.reduce((s,r)=>s+r.aExp,0) / sub.length).toFixed(0);
-      const lAvg = (sub.reduce((s,r)=>s+r.lExp,0) / sub.length).toFixed(0);
-      const lBT  = (sub.reduce((s,r)=>s+(r.lBT||0),0) / sub.length).toFixed(0);
-      txt += '  ' + pad(t.name, 9) + '  A* exp ' + padL(aAvg, 7)
-           + '   LSB exp ' + padL(lAvg, 7)
-           + '   LSB avg bt ' + padL(lBT, 7)
+    for(var mi=0; mi<MAZE_TYPES.length; mi++){
+      var t2 = MAZE_TYPES[mi];
+      var sub = [];
+      for(var si=0; si<rows.length; si++){
+        if(rows[si].type === t2.name && rows[si].aSuccess && rows[si].lSuccess) sub.push(rows[si]);
+      }
+      if(sub.length === 0){
+        txt += '  ' + pad(t2.name, 9) + '  (none)\n';
+        continue;
+      }
+      var aAvgSum = 0, lAvgSum = 0, lBTSum = 0;
+      for(var xi=0; xi<sub.length; xi++){
+        aAvgSum += sub[xi].aExp;
+        lAvgSum += sub[xi].lExp;
+        lBTSum += sub[xi].lBT || 0;
+      }
+      txt += '  ' + pad(t2.name, 9) + '  A* exp ' + padL(Math.round(aAvgSum/sub.length), 7)
+           + '   LSB exp ' + padL(Math.round(lAvgSum/sub.length), 7)
+           + '   LSB avg bt ' + padL(Math.round(lBTSum/sub.length), 7)
            + '   n=' + sub.length + '\n';
     }
 
@@ -1063,9 +1266,7 @@ function massTest(reuse){
   }, 30);
 }
 
-// ===================================================================
-// start
-// ===================================================================
+// ---- start ----
 setSpeed(1);
 setScenario('maze_any');
 requestAnimationFrame(loop);
