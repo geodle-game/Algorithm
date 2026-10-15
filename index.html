@@ -325,6 +325,8 @@ Object.defineProperty(MinHeap.prototype, 'size', { get: function(){ return this.
 // =============== A* ===============
 function AStar(g, start, goal){
   this.grid = g; this.start = start; this.goal = goal;
+  this.W = g[0].length;
+  this.H = g.length;
   this.open = new MinHeap();
   this.open.push([manhattan(start,goal), 0, start]);
   this.gMap = {}; this.gMap[key(start)] = 0;
@@ -339,6 +341,7 @@ function AStar(g, start, goal){
 AStar.prototype.step = function(budget){
   var t0 = performance.now();
   var spent = 0;
+  var g = this.grid, W = this.W, H = this.H;
   while(spent < budget && !this.done){
     if(this.open.size === 0){ this.done = true; this.exhausted = true; break; }
     var item = this.open.pop();
@@ -350,9 +353,14 @@ AStar.prototype.step = function(budget){
     delete this.frontier[kc];
     spent++;
     if(c[0] === this.goal[0] && c[1] === this.goal[1]){ this.done = true; this._recon(c); break; }
-    var ns = neighbors(this.grid, c);
-    for(var i=0; i<ns.length; i++){
-      var n = ns[i]; var ng = gcost + 1; var kn = key(n);
+    for(var i=0; i<N4.length; i++){
+      var nx = c[0] + N4[i][0];
+      var ny = c[1] + N4[i][1];
+      if(nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+      if(g[ny][nx] !== 0) continue;
+      var n = [nx, ny];
+      var ng = gcost + 1;
+      var kn = ny * W + nx;
       if(this.closed[kn]) continue;
       var cur = this.gMap[kn];
       if(cur === undefined || ng < cur){
@@ -373,43 +381,46 @@ AStar.prototype._recon = function(end){
   p.reverse(); this.path = p;
 };
 
-// =============== LSB — persistent parent-chain branches ===============
-// Branch fields:
-//   cell, k       — current position
-//   parent        — Branch this one descended from (null at start)
-//   cameFrom      — cell we stepped from (matches parent.cell normally)
-//   depth         — number of steps from start
-//   stack         — array of junction frames; CoW at fork time only for the
-//                   entry we mutate. Each frame: {k, cell, options, nextIdx}
-//   scoreCache, lastForkDepth, parked
-//
-// hasOnPath(branch, k): walk parent chain. Stops early because chains share
-// suffixes and worst case is depth, but in practice it terminates at the last
-// junction where k was chosen.
-
-function Branch(cell, parent, cameFrom){
+// =============== LSB ===============
+function Branch(cell, path, cameFrom){
   this.cell = cell;
   this.k = cell[1] * W + cell[0];
-  this.parent = parent;
+  this.path = path.slice();
   this.cameFrom = cameFrom;
-  this.depth = parent ? parent.depth + 1 : 0;
+  this.pathSet = {};
+  for(var i=0; i<this.path.length; i++){
+    var c = this.path[i];
+    this.pathSet[c[1]*W + c[0]] = 1;
+  }
   this.stack = [];
   this.parked = false;
   this.scoreCache = 0;
-  this.lastForkDepth = parent ? parent.lastForkDepth : -999;
+  this.depth = this.path.length - 1;
+  this.lastForkDepth = -999;
 }
-Branch.prototype.cloneFor = function(newCell, topFrame){
-  var b = new Branch(newCell, this, this.cell);
-  // Share the parent's stack array reference up to but not including the
-  // frame we're pushing; then push our fresh top frame.
-  b.stack = this.stack.slice();
-  b.stack.push(topFrame);
-  b.lastForkDepth = this.depth + 1;
+Branch.prototype.clone = function(){
+  var b = new Branch(this.cell, this.path, this.cameFrom);
+  b.scoreCache = this.scoreCache;
+  b.depth = this.depth;
+  b.lastForkDepth = this.lastForkDepth;
+  for(var i=0; i<this.stack.length; i++){
+    var s = this.stack[i];
+    b.stack.push({
+      cell: s.cell, k: s.k,
+      options: s.options.slice(),
+      nextIdx: s.nextIdx,
+      pathIdx: s.pathIdx
+    });
+  }
   return b;
 };
 
 function LSB(g, start, goal){
   this.grid = g; this.start = start; this.goal = goal;
+  this.W = g[0].length;
+  this.H = g.length;
+  var W = this.W, H = this.H;
+
   var scale = Math.max(1, Math.floor((W*H) / 3000));
   this.max_branches      = 16 * scale;
   this.max_parked        = 200 * scale;
@@ -459,7 +470,7 @@ function LSB(g, start, goal){
   this.visited[k0] = 1; this._visitedCount++;
   this.generated[k0] = 1;
 
-  var b = new Branch(start, null, null);
+  var b = new Branch(start, [start], null);
   b.scoreCache = dtg[b.k];
   this.branches = [b];
   this.parked = [];
@@ -505,26 +516,8 @@ LSB.prototype._shouldPark = function(b){
   return b.scoreCache > this.layerMedian * 1.5;
 };
 
-// Walk parent chain from b, checking whether k is on the branch's own path.
-LSB.prototype._onPath = function(b, k){
-  var cur = b;
-  while(cur){
-    if(cur.k === k) return true;
-    cur = cur.parent;
-  }
-  return false;
-};
-
-// Reconstruct a full path from start to the branch's current cell.
-LSB.prototype._reconPath = function(b){
-  var arr = [];
-  var cur = b;
-  while(cur){ arr.push(cur.cell); cur = cur.parent; }
-  arr.reverse();
-  return arr;
-};
-
 LSB.prototype._checkForCuts = function(){
+  var W = this.W, H = this.H;
   var N = W * H;
   if(this._visitedCount - this.lastCutCheckVisited < CUT_MIN_VISITED_DELTA) return;
   this.lastCutCheckVisited = this._visitedCount;
@@ -653,6 +646,7 @@ LSB.prototype._checkForCuts = function(){
 
 LSB.prototype.step = function(budget){
   var t0 = performance.now();
+  var W = this.W, H = this.H;
   for(var i=0; i<budget && !this.done; i++){
     if(this.branches.length < this.minActive && this.parked.length > 0){
       this._unpark(this.minActive - this.branches.length);
@@ -696,8 +690,13 @@ LSB.prototype.step = function(budget){
       if(this.parked.length < this.max_parked){
         ob.parked = true; this.parked.push(ob); this.parks++;
       } else {
-        // Just drop the reference — parent chain is shared with survivors,
-        // so there is no path array to scar.
+        for(var pc=0; pc<ob.path.length; pc++){
+          var c = ob.path[pc];
+          var k = c[1]*W + c[0];
+          this.scar[k] += 0.5;
+          this.scarKeys[k] = 1;
+          this.dead[k] = 1;
+        }
         this.kills++;
       }
     }
@@ -731,24 +730,23 @@ LSB.prototype.step = function(budget){
 };
 
 LSB.prototype.stepBranch = function(b, next){
-  if(b.k === this.goalK){ this.done = true; this.path = this._reconPath(b); return; }
+  var W = this.W, H = this.H;
+  if(b.k === this.goalK){ this.done = true; this.path = b.path; return; }
   this.expanded[b.k] = 1;
 
   var x0 = b.cell[0], y0 = b.cell[1];
   var grid = this.grid;
   var openCount = this.openCount;
-  var dtg = this.dtg;
   var opts = [];
 
-  // 4 fixed neighbor checks, no allocation except the small opts array.
   for(var i=0; i<4; i++){
     var nx = x0 + N4[i][0];
     var ny = y0 + N4[i][1];
     if(nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
     if(grid[ny][nx] !== 0) continue;
     var kk = ny * W + nx;
-    if(this._onPath(b, kk)) continue;
-    if(kk === this.goalK){ opts.push(nx, ny, kk); continue; }
+    if(b.pathSet[kk]) continue;
+    if(kk === this.goalK){ opts.push([nx, ny, kk]); continue; }
     if(this.dead[kk]) continue;
     if(openCount[kk] <= 1){
       this.scar[kk] += 1.0;
@@ -757,147 +755,126 @@ LSB.prototype.stepBranch = function(b, next){
       this.earlyDeaths++;
       continue;
     }
-    opts.push(nx, ny, kk);
+    opts.push([nx, ny, kk]);
   }
 
-  var nOpts = opts.length / 3;
-
-  if(nOpts === 0){
+  if(opts.length === 0){
     if(this.backtrack(b, next)) return;
     next.push(b);
     return;
   }
 
-  // Sort a small opts list by dtg, preserving (x,y,k) triples together.
-  // For 4 or fewer options, this is faster than a comparator call in most engines.
-  // We'll pack into fixed slots and use insertion sort on indices.
-  var primaryIdx = 0;
-  var primaryD = dtg[opts[2]];
-  for(var oi=1; oi<nOpts; oi++){
-    var d = dtg[opts[oi*3 + 2]];
-    if(d < primaryD){ primaryD = d; primaryIdx = oi; }
-  }
-
-  // Determine ties (within tryEps)
-  var tiedCount = 0;
-  var tiedSlots = [];  // indices into opts triples
-  for(var oj=0; oj<nOpts; oj++){
-    if(Math.abs(dtg[opts[oj*3 + 2]] - primaryD) < this.tryEps){
-      tiedSlots.push(oj);
-      tiedCount++;
-    }
-  }
-
-  // Move primary to slot 0 position in opts (swap triples)
-  if(primaryIdx !== 0){
-    var t0x = opts[0], t0y = opts[1], t0k = opts[2];
-    opts[0] = opts[primaryIdx*3]; opts[1] = opts[primaryIdx*3 + 1]; opts[2] = opts[primaryIdx*3 + 2];
-    opts[primaryIdx*3] = t0x; opts[primaryIdx*3 + 1] = t0y; opts[primaryIdx*3 + 2] = t0k;
-  }
+  var dtg = this.dtg;
+  opts.sort(function(p, q){ return dtg[p[2]] - dtg[q[2]]; });
+  var primary = opts[0];
 
   var canFork = (b.depth - b.lastForkDepth) >= FORK_COOLDOWN;
-  var madeFork = false;
 
-  if(tiedCount > 1 && canFork){
-    for(var k2=1; k2<tiedSlots.length; k2++){
-      var slot = tiedSlots[k2];
-      if(slot === 0) continue;   // primary was swapped here
-      var nCellX = opts[slot*3], nCellY = opts[slot*3 + 1], nK = opts[slot*3 + 2];
-      var topFrame = {
+  if(opts.length > 1 && canFork){
+    var bestD = dtg[primary[2]];
+    var tiedCount = 1;
+    for(var ti=1; ti<opts.length; ti++) if(Math.abs(dtg[opts[ti][2]] - bestD) < this.tryEps) tiedCount++;
+
+    if(tiedCount > 1){
+      var wrote = 1;
+      for(var k2=1; k2<opts.length && wrote<tiedCount; k2++){
+        if(Math.abs(dtg[opts[k2][2]] - bestD) >= this.tryEps) continue;
+        var nb = b.clone();
+        var nt = opts[k2];
+        nb.stack.push({
+          cell: b.cell, k: b.k,
+          options: opts.slice(),
+          nextIdx: tiedCount,
+          pathIdx: b.path.length - 1
+        });
+        nb.path.push(nt);
+        nb.pathSet[nt[2]] = 1;
+        nb.cameFrom = b.cell;
+        nb.cell = nt; nb.k = nt[2];
+        nb.depth = b.depth + 1;
+        nb.lastForkDepth = nb.depth;
+        nb.scoreCache = dtg[nt[2]] + 0.25 * nb.depth;
+        this._addGenerated(nt[2]);
+        next.push(nb);
+        wrote++;
+      }
+      b.stack.push({
         cell: b.cell, k: b.k,
-        options: opts.slice(),
-        nextIdx: tiedSlots.length
-      };
-      var nb = b.cloneFor([nCellX, nCellY], topFrame);
-      nb.scoreCache = dtg[nK] + 0.25 * nb.depth;
-      this._addGenerated(nK);
-      next.push(nb);
-      madeFork = true;
+        options: opts,
+        nextIdx: tiedCount,
+        pathIdx: b.path.length - 1
+      });
+      b.lastForkDepth = b.depth;
+    } else {
+      b.stack.push({
+        cell: b.cell, k: b.k,
+        options: opts,
+        nextIdx: 1,
+        pathIdx: b.path.length - 1
+      });
     }
-    // Parent records all tied options as taken so its own backtracking skips them
+  } else if(opts.length > 1){
     b.stack.push({
       cell: b.cell, k: b.k,
-      options: opts.slice(),
-      nextIdx: tiedSlots.length
-    });
-    b.lastForkDepth = b.depth;
-  } else if(nOpts > 1){
-    b.stack.push({
-      cell: b.cell, k: b.k,
-      options: opts.slice(),
-      nextIdx: 1
+      options: opts,
+      nextIdx: 1,
+      pathIdx: b.path.length - 1
     });
   }
 
-  // Move parent to the primary neighbor
-  var px = opts[0], py = opts[1], pk = opts[2];
-  // Note: parent chain isn't extended here because we mutate the branch in-place.
-  // We need a new child Branch whose parent is `b`.
-  var childBranch = new Branch([px, py], b, b.cell);
-  childBranch.stack = b.stack.slice();
-  childBranch.parked = false;
-  childBranch.scoreCache = dtg[pk] + 0.25 * childBranch.depth;
-  childBranch.lastForkDepth = b.lastForkDepth;
-  this._addGenerated(pk);
+  b.path.push(primary);
+  b.pathSet[primary[2]] = 1;
+  b.cameFrom = b.cell;
+  b.cell = primary; b.k = primary[2];
+  b.depth++;
+  b.scoreCache = dtg[primary[2]] + 0.25 * b.depth;
+  this._addGenerated(primary[2]);
 
-  if(childBranch.k === this.goalK){ this.done = true; this.path = this._reconPath(childBranch); return; }
+  if(b.k === this.goalK){ this.done = true; this.path = b.path; return; }
 
-  if(this._shouldPark(childBranch)){
+  if(this._shouldPark(b)){
     if(this.parked.length < this.max_parked){
-      childBranch.parked = true;
-      this.parked.push(childBranch);
-      this.parks++;
+      b.parked = true; this.parked.push(b); this.parks++;
       return;
     }
   }
-  next.push(childBranch);
+  next.push(b);
 };
 
 LSB.prototype.backtrack = function(b, next){
+  var W = this.W;
   this.backtracks++;
   while(b.stack.length > 0){
     var top = b.stack[b.stack.length - 1];
     if(top.nextIdx < top.options.length){
-      var slot = top.nextIdx;
+      var nt = top.options[top.nextIdx];
       top.nextIdx++;
-      var nx = top.options[slot*3];
-      var ny = top.options[slot*3 + 1];
-      var nk = top.options[slot*3 + 2];
-      if(this.dead[nk] && nk !== this.goalK) continue;
-      // Pop frames above this one (shared, so we only truncate the local slice)
-      b.stack.length = b.stack.length; // no-op; kept for clarity
-      // Reposition branch to the junction cell, then step to option
-      // The new branch inherits the junction's parent chain.
-      // We navigate the parent chain back to the junction cell.
-      var junctionK = top.k;
-      var anchor = b;
-      while(anchor && anchor.k !== junctionK) anchor = anchor.parent;
-      if(!anchor){
-        // Shouldn't happen; the junction was on this branch's path.
-        b.stack.pop();
-        continue;
+      if(this.dead[nt[2]] && nt[2] !== this.goalK) continue;
+
+      for(var i = b.path.length - 1; i > top.pathIdx; i--){
+        var c = b.path[i];
+        delete b.pathSet[c[1]*W + c[0]];
       }
-      var childBranch = new Branch([nx, ny], anchor, anchor.cell);
-      childBranch.stack = b.stack.slice(0, b.stack.length - 1);
-      childBranch.scoreCache = this.dtg[nk] + 0.25 * childBranch.depth;
-      childBranch.lastForkDepth = anchor.lastForkDepth;
-      this._addGenerated(nk);
-      if(childBranch.k === this.goalK){ this.done = true; this.path = this._reconPath(childBranch); return false; }
-      // Swap b for the new child (we can only return one branch per slot)
-      b.cell = childBranch.cell;
-      b.k = childBranch.k;
-      b.parent = childBranch.parent;
-      b.cameFrom = childBranch.cameFrom;
-      b.depth = childBranch.depth;
-      b.stack = childBranch.stack;
-      b.parked = false;
-      b.scoreCache = childBranch.scoreCache;
-      b.lastForkDepth = childBranch.lastForkDepth;
+      b.path.length = top.pathIdx + 1;
+      b.path.push(nt);
+      b.pathSet[nt[2]] = 1;
+      b.cameFrom = top.cell;
+      b.cell = nt; b.k = nt[2];
+      b.depth = b.path.length - 1;
+      b.scoreCache = this.dtg[nt[2]] + 0.25 * b.depth;
+      this._addGenerated(nt[2]);
+      if(b.k === this.goalK){ this.done = true; this.path = b.path; return false; }
       return false;
     }
     b.stack.pop();
   }
-  // Branch fully exhausted — kill.
+  for(var j=0; j<b.path.length; j++){
+    var c2 = b.path[j];
+    var k2 = c2[1]*W + c2[0];
+    this.scar[k2] += 0.5;
+    this.scarKeys[k2] = 1;
+    this.dead[k2] = 1;
+  }
   this.kills++;
   return true;
 };
@@ -1046,7 +1023,7 @@ var COLOR = {
   frontier:'#ff0', parked:'#f80', visited:'#2a4a7a', path:'#0ff', dead:'#a00'
 };
 
-function draw(ctx, g, view, path, parked){
+function draw(ctx, g, view, path, parked, W, H){
   ctx.fillStyle = COLOR.open;
   ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
   var pathSet = {};
@@ -1092,8 +1069,8 @@ function fmtStats(stats){
 }
 
 function renderCurrent(){
-  draw(ctxA, recording.grid, playbackA, currentA.path, currentA.parked);
-  draw(ctxL, recording.grid, playbackL, currentL.path, currentL.parked);
+  draw(ctxA, recording.grid, playbackA, currentA.path, currentA.parked, recording.W, recording.H);
+  draw(ctxL, recording.grid, playbackL, currentL.path, currentL.parked, recording.W, recording.H);
   var showA = finished ? recording.framesA[recording.framesA.length - 1].stats : currentA.stats;
   var showL = finished ? recording.framesL[recording.framesL.length - 1].stats : currentL.stats;
   document.getElementById('sA').innerHTML = fmtStats(showA);
@@ -1160,6 +1137,8 @@ function buildAndPlay(){
     recording = buildRecording();
     var computeMs = performance.now() - t0;
     recording.computeMs = computeMs;
+    recording.W = W;
+    recording.H = H;
     banner.textContent = 'Recorded ' + recording.ticks + ' frames in ' + fmtTime(computeMs) +
                          ' (A*: ' + recording.framesA.length + ', LSB: ' + recording.framesL.length + ')';
     setTimeout(function(){ banner.style.display = 'none'; }, 2500);
