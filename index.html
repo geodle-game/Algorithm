@@ -90,11 +90,17 @@
 <script>
 var W = 100, H = 50;
 var CELL = 5;
-var TICK_DELAY = 16;
-var BUDGET_PER_TICK = 8;
-var RECORD_STRIDE = 8;
-var MAX_FRAMES = 3000;
-var MASS_MAX_ITERS = 60000;
+
+// ---- RECORDING: one frame = one atomic step of each algorithm ----
+// A*: one frame = one cell expanded
+// LSB: one frame = one layer (every active branch moves one cell)
+var RECORD_BUDGET = 1;
+var RECORD_MAX_FRAMES = 15000;
+
+// ---- mass test can use bigger chunks since it isn't recording ----
+var MASS_BUDGET = 8;
+
+var TICK_DELAY = 16;              // ms per playback frame
 var PLAYBACK_SPEED = 1;
 
 var START = [0, 0];
@@ -227,7 +233,6 @@ var MAZE_TYPES = [
 ];
 
 function manhattan(a,b){ return Math.abs(a[0]-b[0]) + Math.abs(a[1]-b[1]); }
-function euclid(a,b){ var dx = a[0]-b[0], dy = a[1]-b[1]; return Math.sqrt(dx*dx + dy*dy); }
 var N4 = [[1,0],[-1,0],[0,1],[0,-1]];
 function neighbors(g, c){
   var out = [];
@@ -240,7 +245,6 @@ function neighbors(g, c){
 }
 function key(c){ return c[1]*W + c[0]; }
 
-// --- Set helpers that work with objects AND typed arrays ---
 function forEachKey(arr, cb){
   if(arr.length !== undefined){
     for(var i=0; i<arr.length; i++) if(arr[i]) cb(i);
@@ -321,7 +325,7 @@ MinHeap.prototype.pop = function(){
 };
 Object.defineProperty(MinHeap.prototype, 'size', { get: function(){ return this.h.length; } });
 
-// =============== A* (unchanged) ===============
+// =============== A* ===============
 function AStar(g, start, goal){
   this.grid = g; this.start = start; this.goal = goal;
   this.open = new MinHeap();
@@ -372,7 +376,7 @@ AStar.prototype._recon = function(end){
   p.reverse(); this.path = p;
 };
 
-// =============== LSB (optimized) ===============
+// =============== LSB ===============
 function Branch(cell, path, cameFrom){
   this.cell = cell;
   this.k = cell[1] * W + cell[0];
@@ -432,7 +436,7 @@ function LSB(g, start, goal){
   this.dead      = new Uint8Array(N);
   this.frontier  = new Uint8Array(N);
   this.scar      = new Float32Array(N);
-  this.scarKeys  = {};   // sparse map of cells with active scars
+  this.scarKeys  = {};
 
   this._visitedCount = 0;
 
@@ -479,9 +483,11 @@ LSB.prototype._shouldPark = function(b){
   return b.scoreCache > median * 1.5;
 };
 
+// One call to step() = `budget` layers. Each layer = all branches move one cell.
 LSB.prototype.step = function(budget){
   var t0 = performance.now();
   for(var i=0; i<budget && !this.done; i++){
+    // ---- one layer ----
     if(this.branches.length === 0){
       if(this.parked.length === 0){ this.done = true; this.exhausted = true; break; }
       this._unpark(this.minActive);
@@ -522,7 +528,6 @@ LSB.prototype.step = function(budget){
       }
     }
 
-    // rebuild frontier array
     for(var fi=0; fi<ol; fi++) this.frontier[oldBranches[fi].k] = 0;
     for(var fj=0; fj<this.branches.length; fj++) this.frontier[this.branches[fj].k] = 1;
 
@@ -534,13 +539,11 @@ LSB.prototype.step = function(budget){
       this.lastNovelTick = this.tick;
     }
 
-    // decay scars only if active
     if(this.scar_decay > 0 && this.tick % 300 === 0){
-      var toDrop = [];
       for(var sk in this.scarKeys){
         var kv = parseInt(sk, 10);
         var v = this.scar[kv] * (1 - this.scar_decay * 5);
-        if(v < 0.05){ toDrop.push(kv); this.scar[kv] = 0; delete this.scarKeys[sk]; }
+        if(v < 0.05){ this.scar[kv] = 0; delete this.scarKeys[sk]; }
         else this.scar[kv] = v;
       }
     }
@@ -590,7 +593,6 @@ LSB.prototype.stepBranch = function(b, next){
     for(var ti=1; ti<opts.length; ti++) if(Math.abs(dtg[opts[ti][2]] - bestD) < this.tryEps) tiedCount++;
 
     if(tiedCount > 1){
-      // fork alternates
       var wrote = 1;
       for(var k2=1; k2<opts.length && wrote<tiedCount; k2++){
         if(Math.abs(dtg[opts[k2][2]] - bestD) >= this.tryEps) continue;
@@ -627,7 +629,6 @@ LSB.prototype.stepBranch = function(b, next){
     }
   }
 
-  // parent takes primary
   b.path.push(primary);
   b.pathSet[primary[2]] = 1;
   b.cameFrom = b.cell;
@@ -708,6 +709,8 @@ function getStats(algo, isLSB){
 }
 
 // =============== recording ===============
+// One recorded frame = one atomic step of the algorithm.
+// A*: one expansion. LSB: one layer (all branches move one cell).
 function recordFrames(algo, isLSB){
   var frames = [];
   var prevVisited = {};
@@ -727,13 +730,9 @@ function recordFrames(algo, isLSB){
   forEachKey(algo.frontier, function(k){ prevFrontier[k] = 1; });
   if(algo.dead) forEachKey(algo.dead, function(k){ prevDead[k] = 1; });
 
-  var tick = 0;
   var recorded = 1;
-
-  while(!algo.done && recorded < MAX_FRAMES){
-    algo.step(BUDGET_PER_TICK);
-    tick++;
-    if(tick % RECORD_STRIDE !== 0 && !algo.done) continue;
+  while(!algo.done && recorded < RECORD_MAX_FRAMES){
+    algo.step(RECORD_BUDGET);
 
     var addVisited = [];
     forEachKey(algo.visited, function(k){ if(!prevVisited[k]){ addVisited.push(k); prevVisited[k] = 1; } });
@@ -878,7 +877,8 @@ function renderCurrent(){
   document.getElementById('sA').innerHTML = fmtStats(showA);
   document.getElementById('sL').innerHTML = fmtStats(showL);
   if(recording && recording.computeMs !== undefined){
-    var meta = 'wall clock (record + validate): <b>' + fmtTime(recording.computeMs) + '</b>';
+    var meta = 'frame ' + playbackIdx + ' / ' + (recording.ticks - 1) +
+               '  |  wall clock (record): <b>' + fmtTime(recording.computeMs) + '</b>';
     document.getElementById('metaA').innerHTML = meta;
     document.getElementById('metaL').innerHTML = meta;
   }
@@ -938,8 +938,9 @@ function buildAndPlay(){
     recording = buildRecording();
     var computeMs = performance.now() - t0;
     recording.computeMs = computeMs;
-    banner.textContent = 'Recorded in ' + fmtTime(computeMs) + ' - ' + recording.ticks + ' frames';
-    setTimeout(function(){ banner.style.display = 'none'; }, 2000);
+    banner.textContent = 'Recorded ' + recording.ticks + ' frames in ' + fmtTime(computeMs) +
+                         ' (A*: ' + recording.framesA.length + ', LSB: ' + recording.framesL.length + ')';
+    setTimeout(function(){ banner.style.display = 'none'; }, 2500);
     resetPlayback();
     paused = false; finished = false; lastFrameTime = 0;
     document.getElementById('pauseBtn').innerText = 'Pause';
@@ -989,7 +990,7 @@ var lastSeeds = null;
 function runOneOnce(factory, isLSB){
   var algo = factory();
   var iters = 0;
-  while(!algo.done && iters < MASS_MAX_ITERS){ algo.step(BUDGET_PER_TICK); iters++; }
+  while(!algo.done && iters < 60000){ algo.step(MASS_BUDGET); iters++; }
   var s = getStats(algo, isLSB);
   return { stats: s, algMs: algo.algMs, backtracks: s.backtracks, parks: s.parks, resumes: s.resumes, kills: s.kills };
 }
