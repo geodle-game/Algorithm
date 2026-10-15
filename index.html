@@ -103,10 +103,7 @@ var grid = null;
 
 function rng(seed){
   var s = seed >>> 0;
-  return function(){
-    s = (s * 1664525 + 1013904223) >>> 0;
-    return s / 4294967296;
-  };
+  return function(){ s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
 }
 var seedCounter = 0;
 function freshSeed(){
@@ -118,14 +115,9 @@ function freshSeed(){
 
 function makeOpen(){
   var g = [];
-  for(var y=0; y<H; y++){
-    var row = [];
-    for(var x=0; x<W; x++) row.push(0);
-    g.push(row);
-  }
+  for(var y=0; y<H; y++){ var row = []; for(var x=0; x<W; x++) row.push(0); g.push(row); }
   return g;
 }
-
 function makeSparse(){
   var g = makeOpen();
   var sx = W/60, sy = H/30;
@@ -134,56 +126,32 @@ function makeSparse(){
     var b = blocks[i];
     var x0 = Math.floor(b[0]*sx), y0 = Math.floor(b[1]*sy);
     var x1 = Math.floor(b[2]*sx), y1 = Math.floor(b[3]*sy);
-    for(var yy=y0; yy<y1; yy++){
-      for(var xx=x0; xx<x1; xx++){
-        if(yy>=0 && yy<H && xx>=0 && xx<W) g[yy][xx] = 1;
-      }
-    }
+    for(var yy=y0; yy<y1; yy++) for(var xx=x0; xx<x1; xx++)
+      if(yy>=0 && yy<H && xx>=0 && xx<W) g[yy][xx] = 1;
   }
-  g[0][0] = 0;
-  g[H-1][W-1] = 0;
+  g[0][0] = 0; g[H-1][W-1] = 0;
   return g;
 }
-
 function makeRandom(density, seed){
   var r = rng(seed);
   var g = [];
-  for(var y=0; y<H; y++){
-    var row = [];
-    for(var x=0; x<W; x++) row.push(r() < density ? 1 : 0);
-    g.push(row);
-  }
-  g[0][0] = 0;
-  g[H-1][W-1] = 0;
+  for(var y=0; y<H; y++){ var row = []; for(var x=0; x<W; x++) row.push(r() < density ? 1 : 0); g.push(row); }
+  g[0][0] = 0; g[H-1][W-1] = 0;
   return g;
 }
-
 function makeMazeDFS(seed){
   var r = rng(seed);
   var rx = Math.floor((W-1)/2), ry = Math.floor((H-1)/2);
   var g = [];
-  for(var y=0; y<H; y++){
-    var row = [];
-    for(var x=0; x<W; x++) row.push(1);
-    g.push(row);
-  }
+  for(var y=0; y<H; y++){ var row = []; for(var x=0; x<W; x++) row.push(1); g.push(row); }
   var visited = [];
-  for(var yy=0; yy<ry; yy++){
-    var vr = [];
-    for(var xx=0; xx<rx; xx++) vr.push(false);
-    visited.push(vr);
-  }
-  var stack = [[0,0]];
-  visited[0][0] = true;
-  g[1][1] = 0;
+  for(var yy=0; yy<ry; yy++){ var vr = []; for(var xx=0; xx<rx; xx++) vr.push(false); visited.push(vr); }
+  var stack = [[0,0]]; visited[0][0] = true; g[1][1] = 0;
   while(stack.length > 0){
     var top = stack[stack.length-1];
     var cx = top[0], cy = top[1];
     var dirs = [[1,0],[-1,0],[0,1],[0,-1]];
-    for(var i=dirs.length-1; i>0; i--){
-      var j = Math.floor(r()*(i+1));
-      var tmp = dirs[i]; dirs[i] = dirs[j]; dirs[j] = tmp;
-    }
+    for(var i=dirs.length-1; i>0; i--){ var j = Math.floor(r()*(i+1)); var tmp = dirs[i]; dirs[i] = dirs[j]; dirs[j] = tmp; }
     var moved = false;
     for(var k=0; k<dirs.length; k++){
       var nx = cx + dirs[k][0], ny = cy + dirs[k][1];
@@ -191,34 +159,21 @@ function makeMazeDFS(seed){
       if(visited[ny][nx]) continue;
       g[cy*2+1+dirs[k][1]][cx*2+1+dirs[k][0]] = 0;
       g[ny*2+1][nx*2+1] = 0;
-      visited[ny][nx] = true;
-      stack.push([nx,ny]);
-      moved = true;
-      break;
+      visited[ny][nx] = true; stack.push([nx,ny]); moved = true; break;
     }
     if(!moved) stack.pop();
   }
   return g;
 }
-
 function makeMazePrim(seed){
   var r = rng(seed);
   var rx = Math.floor((W-1)/2), ry = Math.floor((H-1)/2);
   var g = [];
-  for(var y=0; y<H; y++){
-    var row = [];
-    for(var x=0; x<W; x++) row.push(1);
-    g.push(row);
-  }
+  for(var y=0; y<H; y++){ var row = []; for(var x=0; x<W; x++) row.push(1); g.push(row); }
   var inMaze = [];
-  for(var yy=0; yy<ry; yy++){
-    var vr = [];
-    for(var xx=0; xx<rx; xx++) vr.push(false);
-    inMaze.push(vr);
-  }
+  for(var yy=0; yy<ry; yy++){ var vr = []; for(var xx=0; xx<rx; xx++) vr.push(false); inMaze.push(vr); }
   var frontier = [];
-  inMaze[0][0] = true;
-  g[1][1] = 0;
+  inMaze[0][0] = true; g[1][1] = 0;
   var dirs4 = [[1,0],[-1,0],[0,1],[0,-1]];
   for(var i=0; i<dirs4.length; i++){
     var nx = dirs4[i][0], ny = dirs4[i][1];
@@ -239,39 +194,21 @@ function makeMazePrim(seed){
   }
   return g;
 }
-
 function makeMazeKruskal(seed){
   var r = rng(seed);
   var rx = Math.floor((W-1)/2), ry = Math.floor((H-1)/2);
   var g = [];
-  for(var y=0; y<H; y++){
-    var row = [];
-    for(var x=0; x<W; x++) row.push(1);
-    g.push(row);
-  }
-  for(var yy=0; yy<ry; yy++){
-    for(var xx=0; xx<rx; xx++) g[yy*2+1][xx*2+1] = 0;
-  }
+  for(var y=0; y<H; y++){ var row = []; for(var x=0; x<W; x++) row.push(1); g.push(row); }
+  for(var yy=0; yy<ry; yy++) for(var xx=0; xx<rx; xx++) g[yy*2+1][xx*2+1] = 0;
   var parent = new Int32Array(rx*ry);
   for(var i=0; i<rx*ry; i++) parent[i] = i;
-  function find(x){
-    while(parent[x] !== x){
-      parent[x] = parent[parent[x]];
-      x = parent[x];
-    }
-    return x;
-  }
+  function find(x){ while(parent[x] !== x){ parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
   var walls = [];
-  for(var y2=0; y2<ry; y2++){
-    for(var x2=0; x2<rx; x2++){
-      if(x2+1 < rx) walls.push([x2,y2,x2+1,y2]);
-      if(y2+1 < ry) walls.push([x2,y2,x2,y2+1]);
-    }
+  for(var y2=0; y2<ry; y2++) for(var x2=0; x2<rx; x2++){
+    if(x2+1 < rx) walls.push([x2,y2,x2+1,y2]);
+    if(y2+1 < ry) walls.push([x2,y2,x2,y2+1]);
   }
-  for(var k=walls.length-1; k>0; k--){
-    var j = Math.floor(r()*(k+1));
-    var tmp = walls[k]; walls[k] = walls[j]; walls[j] = tmp;
-  }
+  for(var k=walls.length-1; k>0; k--){ var j = Math.floor(r()*(k+1)); var tmp = walls[k]; walls[k] = walls[j]; walls[j] = tmp; }
   for(var wi=0; wi<walls.length; wi++){
     var wall = walls[wi];
     var ra = find(wall[1]*rx + wall[0]);
@@ -283,7 +220,6 @@ function makeMazeKruskal(seed){
   }
   return g;
 }
-
 var MAZE_TYPES = [
   { name:'DFS',     fn: makeMazeDFS },
   { name:'Prim',    fn: makeMazePrim },
@@ -303,24 +239,39 @@ function neighbors(g, c){
   return out;
 }
 function key(c){ return c[1]*W + c[0]; }
+
+// --- Set helpers that work with objects AND typed arrays ---
+function forEachKey(arr, cb){
+  if(arr.length !== undefined){
+    for(var i=0; i<arr.length; i++) if(arr[i]) cb(i);
+  } else {
+    for(var k in arr) if(arr[k]) cb(parseInt(k, 10));
+  }
+}
 function countKeys(obj){
   var n = 0;
-  for(var k in obj) if(obj[k]) n++;
+  if(obj.length !== undefined){
+    for(var i=0; i<obj.length; i++) if(obj[i]) n++;
+  } else {
+    for(var k in obj) if(obj[k]) n++;
+  }
   return n;
 }
 function keysOf(obj){
   var out = [];
-  for(var k in obj) if(obj[k]) out.push(parseInt(k,10));
+  if(obj.length !== undefined){
+    for(var i=0; i<obj.length; i++) if(obj[i]) out.push(i);
+  } else {
+    for(var k in obj) if(obj[k]) out.push(parseInt(k, 10));
+  }
   return out;
 }
 
 function validatePath(g, path, start, goal){
   if(!path || path.length === 0) return { ok:false, reason:'empty path' };
-  if(path[0][0] !== start[0] || path[0][1] !== start[1])
-    return { ok:false, reason:'start mismatch' };
+  if(path[0][0] !== start[0] || path[0][1] !== start[1]) return { ok:false, reason:'start mismatch' };
   var last = path[path.length-1];
-  if(last[0] !== goal[0] || last[1] !== goal[1])
-    return { ok:false, reason:'goal mismatch' };
+  if(last[0] !== goal[0] || last[1] !== goal[1]) return { ok:false, reason:'goal mismatch' };
   for(var i=0; i<path.length; i++){
     var x = path[i][0], y = path[i][1];
     if(x<0 || x>=W || y<0 || y>=H) return { ok:false, reason:'OOB at ' + i };
@@ -368,31 +319,21 @@ MinHeap.prototype.pop = function(){
   }
   return top;
 };
-Object.defineProperty(MinHeap.prototype, 'size', {
-  get: function(){ return this.h.length; }
-});
+Object.defineProperty(MinHeap.prototype, 'size', { get: function(){ return this.h.length; } });
 
+// =============== A* (unchanged) ===============
 function AStar(g, start, goal){
-  this.grid = g;
-  this.start = start;
-  this.goal = goal;
+  this.grid = g; this.start = start; this.goal = goal;
   this.open = new MinHeap();
   this.open.push([manhattan(start,goal), 0, start]);
-  this.gMap = {};
-  this.gMap[key(start)] = 0;
+  this.gMap = {}; this.gMap[key(start)] = 0;
   this.came = {};
   this.closed = {};
-  this.visited = {};
-  this.generated = {};
-  this.expanded = {};
-  this.frontier = {};
+  this.visited = {}; this.generated = {}; this.expanded = {}; this.frontier = {};
   this.visited[key(start)] = true;
   this.generated[key(start)] = true;
   this.frontier[key(start)] = true;
-  this.done = false;
-  this.exhausted = false;
-  this.path = null;
-  this.algMs = 0;
+  this.done = false; this.exhausted = false; this.path = null; this.algMs = 0;
 }
 AStar.prototype.step = function(budget){
   var t0 = performance.now();
@@ -400,25 +341,17 @@ AStar.prototype.step = function(budget){
   while(spent < budget && !this.done){
     if(this.open.size === 0){ this.done = true; this.exhausted = true; break; }
     var item = this.open.pop();
-    var gcost = item[1];
-    var c = item[2];
-    var kc = key(c);
+    var gcost = item[1]; var c = item[2]; var kc = key(c);
     if(this.closed[kc]) continue;
     this.closed[kc] = true;
     this.visited[kc] = true;
     this.expanded[kc] = true;
     delete this.frontier[kc];
     spent++;
-    if(c[0] === this.goal[0] && c[1] === this.goal[1]){
-      this.done = true;
-      this._recon(c);
-      break;
-    }
+    if(c[0] === this.goal[0] && c[1] === this.goal[1]){ this.done = true; this._recon(c); break; }
     var ns = neighbors(this.grid, c);
     for(var i=0; i<ns.length; i++){
-      var n = ns[i];
-      var ng = gcost + 1;
-      var kn = key(n);
+      var n = ns[i]; var ng = gcost + 1; var kn = key(n);
       if(this.closed[kn]) continue;
       var cur = this.gMap[kn];
       if(cur === undefined || ng < cur){
@@ -434,35 +367,35 @@ AStar.prototype.step = function(budget){
   this.algMs += performance.now() - t0;
 };
 AStar.prototype._recon = function(end){
-  var p = [];
-  var c = end;
-  while(c){
-    p.push(c);
-    c = this.came[key(c)];
-  }
-  p.reverse();
-  this.path = p;
+  var p = []; var c = end;
+  while(c){ p.push(c); c = this.came[key(c)]; }
+  p.reverse(); this.path = p;
 };
 
+// =============== LSB (optimized) ===============
 function Branch(cell, path, cameFrom){
   this.cell = cell;
+  this.k = cell[1] * W + cell[0];
   this.path = path.slice();
   this.cameFrom = cameFrom;
   this.pathSet = {};
-  for(var i=0; i<this.path.length; i++) this.pathSet[key(this.path[i])] = true;
+  for(var i=0; i<this.path.length; i++){
+    var c = this.path[i];
+    this.pathSet[c[1]*W + c[0]] = 1;
+  }
   this.stack = [];
-  this.bestEver = manhattan(cell, GOAL);
   this.parkCount = 0;
   this.parked = false;
+  this.scoreCache = 0;
 }
 Branch.prototype.clone = function(){
   var b = new Branch(this.cell, this.path, this.cameFrom);
-  b.bestEver = this.bestEver;
   b.parkCount = 0;
+  b.scoreCache = this.scoreCache;
   for(var i=0; i<this.stack.length; i++){
     var s = this.stack[i];
     b.stack.push({
-      cell: s.cell,
+      cell: s.cell, k: s.k,
       options: s.options.slice(),
       nextIdx: s.nextIdx,
       pathIdx: s.pathIdx
@@ -470,14 +403,9 @@ Branch.prototype.clone = function(){
   }
   return b;
 };
-Branch.prototype.score = function(){
-  return euclid(this.cell, GOAL) + 0.25 * this.path.length;
-};
 
 function LSB(g, start, goal){
-  this.grid = g;
-  this.start = start;
-  this.goal = goal;
+  this.grid = g; this.start = start; this.goal = goal;
   var scale = Math.max(1, Math.floor((W*H) / 3000));
   this.max_branches      = 16 * scale;
   this.max_parked        = 32 * scale;
@@ -488,96 +416,50 @@ function LSB(g, start, goal){
   this.minActive         = 4 * scale;
   this.stallThreshold    = 200 * scale;
 
-  this.scar = {};
+  var N = W * H;
+  var dtg = new Float32Array(N);
+  var gx = goal[0], gy = goal[1];
+  for(var y=0; y<H; y++){
+    var dy = y - gy; var base = y * W;
+    for(var x=0; x<W; x++){ var dx = x - gx; dtg[base + x] = Math.sqrt(dx*dx + dy*dy); }
+  }
+  this.dtg = dtg;
+  this.goalK = goal[1]*W + goal[0];
+
+  this.visited   = new Uint8Array(N);
+  this.generated = new Uint8Array(N);
+  this.expanded  = new Uint8Array(N);
+  this.dead      = new Uint8Array(N);
+  this.frontier  = new Uint8Array(N);
+  this.scar      = new Float32Array(N);
+  this.scarKeys  = {};   // sparse map of cells with active scars
+
+  this._visitedCount = 0;
+
+  var k0 = start[1]*W + start[0];
+  this.visited[k0] = 1; this._visitedCount++;
+  this.generated[k0] = 1;
+
   var b = new Branch(start, [start], null);
+  b.scoreCache = dtg[b.k];
   this.branches = [b];
   this.parked = [];
-  this.done = false;
-  this.exhausted = false;
-  this.path = null;
-  this.tick = 0;
-  this.lastNovelTick = 0;
-  this.backtracks = 0;
-  this.parks = 0;
-  this.resumes = 0;
-  this.kills = 0;
-  this.visited = {};
-  this.generated = {};
-  this.expanded = {};
-  this.frontier = {};
-  this.dead = {};
-  this.visited[key(start)] = true;
-  this.generated[key(start)] = true;
-  this.frontier[key(start)] = true;
+  this.done = false; this.exhausted = false; this.path = null;
+  this.tick = 0; this.lastNovelTick = 0;
+  this.backtracks = 0; this.parks = 0; this.resumes = 0; this.kills = 0;
   this.algMs = 0;
-  this._visitedCount = 1;
 }
-LSB.prototype._scarAdd = function(c, amt){
-  var k = key(c);
-  this.scar[k] = (this.scar[k] || 0) + amt;
-};
-LSB.prototype.step = function(budget){
-  var t0 = performance.now();
-  var self = this;
-  for(var i=0; i<budget && !this.done; i++){
-    if(this.branches.length === 0){
-      if(this.parked.length === 0){
-        this.done = true;
-        this.exhausted = true;
-        break;
-      }
-      this._unpark(this.minActive);
-    }
-    this.tick++;
-    var novelBefore = this._visitedCount;
-    var next = [];
-    var stop = false;
-    for(var bi=0; bi<this.branches.length; bi++){
-      this.stepBranch(this.branches[bi], next);
-      if(this.done){ stop = true; break; }
-    }
-    if(stop) break;
-    next.sort(function(a,b){ return a.score() - b.score(); });
-    var keep = next.slice(0, this.max_branches);
-    var overflow = next.slice(this.max_branches);
-    this.branches = keep;
-    for(var oi=0; oi<overflow.length; oi++){
-      var ob = overflow[oi];
-      if(this.parked.length < this.max_parked){
-        ob.parked = true;
-        this.parked.push(ob);
-        this.parks++;
-      } else {
-        for(var pc=0; pc<ob.path.length; pc++){
-          this._scarAdd(ob.path[pc], 0.5);
-          this.dead[key(ob.path[pc])] = true;
-        }
-        this.kills++;
-      }
-    }
-    this.frontier = {};
-    for(var fi=0; fi<this.branches.length; fi++){
-      this.frontier[key(this.branches[fi].cell)] = true;
-    }
-    var novelAfter = this._visitedCount;
-    if(novelAfter > novelBefore){
-      this.lastNovelTick = this.tick;
-    } else if(this.tick - this.lastNovelTick > this.stallThreshold && this.parked.length > 0){
-      this._unpark(this.minActive);
-      this.lastNovelTick = this.tick;
-    }
-    if(this.scar_decay > 0 && this.tick % 60 === 0){
-      for(var sk in this.scar){
-        var v = this.scar[sk] * (1 - this.scar_decay);
-        if(v < 0.05) delete this.scar[sk];
-        else this.scar[sk] = v;
-      }
-    }
+
+LSB.prototype._addGenerated = function(k){
+  if(!this.visited[k]){
+    this.visited[k] = 1;
+    this.generated[k] = 1;
+    this._visitedCount++;
   }
-  this.algMs += performance.now() - t0;
 };
+
 LSB.prototype._unpark = function(n){
-  this.parked.sort(function(a,b){ return a.score() - b.score(); });
+  this.parked.sort(function(a,b){ return a.scoreCache - b.scoreCache; });
   var take = Math.min(n, this.parked.length);
   for(var j=0; j<take; j++){
     var b = this.parked.shift();
@@ -586,105 +468,185 @@ LSB.prototype._unpark = function(n){
     this.resumes++;
   }
 };
-LSB.prototype._addGenerated = function(c){
-  var k = key(c);
-  if(!this.visited[k]){
-    this.visited[k] = true;
-    this.generated[k] = true;
-    this._visitedCount++;
-  }
+
+LSB.prototype._shouldPark = function(b){
+  if(this.branches.length <= this.minActive) return false;
+  if(this.parked.length >= this.max_parked) return false;
+  var scored = [];
+  for(var i=0; i<this.branches.length; i++) scored.push(this.branches[i].scoreCache);
+  scored.sort(function(a,b){ return a - b; });
+  var median = scored[Math.floor(scored.length/2)];
+  return b.scoreCache > median * 1.5;
 };
+
+LSB.prototype.step = function(budget){
+  var t0 = performance.now();
+  for(var i=0; i<budget && !this.done; i++){
+    if(this.branches.length === 0){
+      if(this.parked.length === 0){ this.done = true; this.exhausted = true; break; }
+      this._unpark(this.minActive);
+    }
+    this.tick++;
+    var novelBefore = this._visitedCount;
+    var oldBranches = this.branches;
+    var ol = oldBranches.length;
+    var next = [];
+    var stop = false;
+    for(var bi=0; bi<ol; bi++){
+      this.stepBranch(oldBranches[bi], next);
+      if(this.done){ stop = true; break; }
+    }
+    if(stop) break;
+
+    next.sort(function(a,b){ return a.scoreCache - b.scoreCache; });
+    var overflow = [];
+    if(next.length > this.max_branches){
+      overflow = next.slice(this.max_branches);
+      next.length = this.max_branches;
+    }
+    this.branches = next;
+
+    for(var oi=0; oi<overflow.length; oi++){
+      var ob = overflow[oi];
+      if(this.parked.length < this.max_parked){
+        ob.parked = true; this.parked.push(ob); this.parks++;
+      } else {
+        for(var pc=0; pc<ob.path.length; pc++){
+          var c = ob.path[pc];
+          var k = c[1]*W + c[0];
+          this.scar[k] += 0.5;
+          this.scarKeys[k] = 1;
+          this.dead[k] = 1;
+        }
+        this.kills++;
+      }
+    }
+
+    // rebuild frontier array
+    for(var fi=0; fi<ol; fi++) this.frontier[oldBranches[fi].k] = 0;
+    for(var fj=0; fj<this.branches.length; fj++) this.frontier[this.branches[fj].k] = 1;
+
+    var novelAfter = this._visitedCount;
+    if(novelAfter > novelBefore){
+      this.lastNovelTick = this.tick;
+    } else if(this.tick - this.lastNovelTick > this.stallThreshold && this.parked.length > 0){
+      this._unpark(this.minActive);
+      this.lastNovelTick = this.tick;
+    }
+
+    // decay scars only if active
+    if(this.scar_decay > 0 && this.tick % 300 === 0){
+      var toDrop = [];
+      for(var sk in this.scarKeys){
+        var kv = parseInt(sk, 10);
+        var v = this.scar[kv] * (1 - this.scar_decay * 5);
+        if(v < 0.05){ toDrop.push(kv); this.scar[kv] = 0; delete this.scarKeys[sk]; }
+        else this.scar[kv] = v;
+      }
+    }
+  }
+  this.algMs += performance.now() - t0;
+};
+
 LSB.prototype.stepBranch = function(b, next){
-  if(b.cell[0] === this.goal[0] && b.cell[1] === this.goal[1]){
-    this.done = true;
-    this.path = b.path;
-    return;
-  }
-  this.expanded[key(b.cell)] = true;
-  var rawOpts = neighbors(this.grid, b.cell);
+  if(b.k === this.goalK){ this.done = true; this.path = b.path; return; }
+  this.expanded[b.k] = 1;
+
+  var x0 = b.cell[0], y0 = b.cell[1];
+  var grid = this.grid;
   var opts = [];
-  for(var i=0; i<rawOpts.length; i++){
-    if(!b.pathSet[key(rawOpts[i])]) opts.push(rawOpts[i]);
+  var kk;
+
+  if(x0 + 1 < W && grid[y0][x0 + 1] === 0){
+    kk = y0 * W + (x0 + 1);
+    if(!b.pathSet[kk]) opts.push([x0 + 1, y0, kk]);
   }
+  if(x0 - 1 >= 0 && grid[y0][x0 - 1] === 0){
+    kk = y0 * W + (x0 - 1);
+    if(!b.pathSet[kk]) opts.push([x0 - 1, y0, kk]);
+  }
+  if(y0 + 1 < H && grid[y0 + 1][x0] === 0){
+    kk = (y0 + 1) * W + x0;
+    if(!b.pathSet[kk]) opts.push([x0, y0 + 1, kk]);
+  }
+  if(y0 - 1 >= 0 && grid[y0 - 1][x0] === 0){
+    kk = (y0 - 1) * W + x0;
+    if(!b.pathSet[kk]) opts.push([x0, y0 - 1, kk]);
+  }
+
   if(opts.length === 0){
-    var dead = this.backtrack(b, next);
-    if(dead) return;
+    if(this.backtrack(b, next)) return;
     next.push(b);
     return;
   }
-  var self = this;
-  opts.sort(function(p,q){ return euclid(p, self.goal) - euclid(q, self.goal); });
+
+  var dtg = this.dtg;
+  opts.sort(function(p, q){ return dtg[p[2]] - dtg[q[2]]; });
   var primary = opts[0];
+
   if(opts.length > 1){
-    var bestD = euclid(primary, this.goal);
-    var tied = [];
-    for(var ti=0; ti<opts.length; ti++){
-      if(Math.abs(euclid(opts[ti], this.goal) - bestD) < this.tryEps) tied.push(opts[ti]);
-    }
-    if(tied.length > 1){
-      for(var k=1; k<tied.length; k++){
+    var bestD = dtg[primary[2]];
+    var tiedCount = 1;
+    for(var ti=1; ti<opts.length; ti++) if(Math.abs(dtg[opts[ti][2]] - bestD) < this.tryEps) tiedCount++;
+
+    if(tiedCount > 1){
+      // fork alternates
+      var wrote = 1;
+      for(var k2=1; k2<opts.length && wrote<tiedCount; k2++){
+        if(Math.abs(dtg[opts[k2][2]] - bestD) >= this.tryEps) continue;
         var nb = b.clone();
-        var nt = tied[k];
+        var nt = opts[k2];
         nb.stack.push({
-          cell: b.cell,
+          cell: b.cell, k: b.k,
           options: opts.slice(),
-          nextIdx: tied.length,
+          nextIdx: tiedCount,
           pathIdx: b.path.length - 1
         });
         nb.path.push(nt);
-        nb.pathSet[key(nt)] = true;
+        nb.pathSet[nt[2]] = 1;
         nb.cameFrom = b.cell;
-        nb.cell = nt;
-        nb.bestEver = Math.min(nb.bestEver, manhattan(nt, this.goal));
-        this._addGenerated(nt);
+        nb.cell = nt; nb.k = nt[2];
+        nb.scoreCache = dtg[nt[2]] + 0.25 * nb.path.length;
+        this._addGenerated(nt[2]);
         next.push(nb);
+        wrote++;
       }
       b.stack.push({
-        cell: b.cell,
-        options: opts.slice(),
-        nextIdx: tied.length,
+        cell: b.cell, k: b.k,
+        options: opts,
+        nextIdx: tiedCount,
         pathIdx: b.path.length - 1
       });
     } else {
       b.stack.push({
-        cell: b.cell,
-        options: opts.slice(),
+        cell: b.cell, k: b.k,
+        options: opts,
         nextIdx: 1,
         pathIdx: b.path.length - 1
       });
     }
   }
+
+  // parent takes primary
   b.path.push(primary);
-  b.pathSet[key(primary)] = true;
+  b.pathSet[primary[2]] = 1;
   b.cameFrom = b.cell;
-  b.cell = primary;
-  this._addGenerated(primary);
-  var d = manhattan(primary, this.goal);
-  if(d < b.bestEver) b.bestEver = d;
-  if(primary[0] === this.goal[0] && primary[1] === this.goal[1]){
-    this.done = true;
-    this.path = b.path;
-    return;
-  }
+  b.cell = primary; b.k = primary[2];
+  b.scoreCache = dtg[primary[2]] + 0.25 * b.path.length;
+  this._addGenerated(primary[2]);
+
+  if(b.k === this.goalK){ this.done = true; this.path = b.path; return; }
+
   if(b.parkCount < this.maxParksPerBranch && this._shouldPark(b)){
     b.parkCount++;
     if(this.parked.length < this.max_parked){
-      b.parked = true;
-      this.parked.push(b);
-      this.parks++;
+      b.parked = true; this.parked.push(b); this.parks++;
       return;
     }
   }
   next.push(b);
 };
-LSB.prototype._shouldPark = function(b){
-  if(this.branches.length <= this.minActive) return false;
-  var scored = [];
-  for(var i=0; i<this.branches.length; i++) scored.push(this.branches[i].score());
-  scored.sort(function(a,b){ return a-b; });
-  var median = scored[Math.floor(scored.length/2)];
-  return b.score() > median * 1.5;
-};
+
 LSB.prototype.backtrack = function(b, next){
   this.backtracks++;
   while(b.stack.length > 0){
@@ -693,33 +655,33 @@ LSB.prototype.backtrack = function(b, next){
       var nt = top.options[top.nextIdx];
       top.nextIdx++;
       for(var i = b.path.length - 1; i > top.pathIdx; i--){
-        delete b.pathSet[key(b.path[i])];
+        var c = b.path[i];
+        b.pathSet[c[1]*W + c[0]] = 0;
       }
-      b.path = b.path.slice(0, top.pathIdx + 1);
+      b.path.length = top.pathIdx + 1;
       b.path.push(nt);
-      b.pathSet[key(nt)] = true;
+      b.pathSet[nt[2]] = 1;
       b.cameFrom = top.cell;
-      b.cell = nt;
-      this._addGenerated(nt);
-      var d = manhattan(nt, this.goal);
-      if(d < b.bestEver) b.bestEver = d;
-      if(nt[0] === this.goal[0] && nt[1] === this.goal[1]){
-        this.done = true;
-        this.path = b.path;
-        return false;
-      }
+      b.cell = nt; b.k = nt[2];
+      b.scoreCache = this.dtg[nt[2]] + 0.25 * b.path.length;
+      this._addGenerated(nt[2]);
+      if(b.k === this.goalK){ this.done = true; this.path = b.path; return false; }
       return false;
     }
     b.stack.pop();
   }
   for(var j=0; j<b.path.length; j++){
-    this._scarAdd(b.path[j], 0.5);
-    this.dead[key(b.path[j])] = true;
+    var c2 = b.path[j];
+    var k2 = c2[1]*W + c2[0];
+    this.scar[k2] += 0.5;
+    this.scarKeys[k2] = 1;
+    this.dead[k2] = 1;
   }
   this.kills++;
   return true;
 };
 
+// =============== stats ===============
 function getStats(algo, isLSB){
   var validPath = algo.path
     ? validatePath(algo.grid, algo.path, algo.start, algo.goal)
@@ -745,12 +707,12 @@ function getStats(algo, isLSB){
   };
 }
 
+// =============== recording ===============
 function recordFrames(algo, isLSB){
   var frames = [];
   var prevVisited = {};
   var prevFrontier = {};
   var prevDead = {};
-  var k;
 
   frames.push({
     addVisited: keysOf(algo.visited),
@@ -758,12 +720,12 @@ function recordFrames(algo, isLSB){
     remFrontier: [],
     addDead: algo.dead ? keysOf(algo.dead) : [],
     path: algo.path ? algo.path.slice() : null,
-    parked: isLSB && algo.parked ? algo.parked.map(function(b){ return key(b.cell); }) : null,
+    parked: isLSB && algo.parked ? algo.parked.map(function(b){ return b.k; }) : null,
     stats: getStats(algo, isLSB)
   });
-  for(k in algo.visited) if(algo.visited[k]) prevVisited[k] = true;
-  for(k in algo.frontier) if(algo.frontier[k]) prevFrontier[k] = true;
-  if(algo.dead) for(k in algo.dead) if(algo.dead[k]) prevDead[k] = true;
+  forEachKey(algo.visited, function(k){ prevVisited[k] = 1; });
+  forEachKey(algo.frontier, function(k){ prevFrontier[k] = 1; });
+  if(algo.dead) forEachKey(algo.dead, function(k){ prevDead[k] = 1; });
 
   var tick = 0;
   var recorded = 1;
@@ -771,20 +733,18 @@ function recordFrames(algo, isLSB){
   while(!algo.done && recorded < MAX_FRAMES){
     algo.step(BUDGET_PER_TICK);
     tick++;
-
-    // Only record on stride boundary, or on final tick
     if(tick % RECORD_STRIDE !== 0 && !algo.done) continue;
 
     var addVisited = [];
-    for(k in algo.visited) if(algo.visited[k] && !prevVisited[k]){ addVisited.push(parseInt(k,10)); prevVisited[k] = true; }
+    forEachKey(algo.visited, function(k){ if(!prevVisited[k]){ addVisited.push(k); prevVisited[k] = 1; } });
     var addFrontier = [];
-    for(k in algo.frontier) if(algo.frontier[k] && !prevFrontier[k]){ addFrontier.push(parseInt(k,10)); prevFrontier[k] = true; }
+    forEachKey(algo.frontier, function(k){ if(!prevFrontier[k]){ addFrontier.push(k); prevFrontier[k] = 1; } });
     var remFrontier = [];
-    for(k in prevFrontier) if(prevFrontier[k] && !algo.frontier[k]) remFrontier.push(parseInt(k,10));
+    for(var k in prevFrontier) if(prevFrontier[k] && !algo.frontier[k]) remFrontier.push(parseInt(k, 10));
     for(var ri=0; ri<remFrontier.length; ri++) delete prevFrontier[remFrontier[ri]];
     var addDead = [];
     if(algo.dead){
-      for(k in algo.dead) if(algo.dead[k] && !prevDead[k]){ addDead.push(parseInt(k,10)); prevDead[k] = true; }
+      forEachKey(algo.dead, function(k){ if(!prevDead[k]){ addDead.push(k); prevDead[k] = 1; } });
     }
     frames.push({
       addVisited: addVisited,
@@ -792,7 +752,7 @@ function recordFrames(algo, isLSB){
       remFrontier: remFrontier,
       addDead: addDead,
       path: algo.path ? algo.path.slice() : null,
-      parked: isLSB && algo.parked ? algo.parked.map(function(b){ return key(b.cell); }) : null,
+      parked: isLSB && algo.parked ? algo.parked.map(function(b){ return b.k; }) : null,
       stats: getStats(algo, isLSB)
     });
     recorded++;
@@ -807,18 +767,17 @@ function buildRecording(){
   var framesL = recordFrames(l, true);
   var ticks = Math.max(framesA.length, framesL.length);
   var idleA = framesA[framesA.length-1];
-  while(framesA.length < ticks){
+  while(framesA.length < ticks)
     framesA.push({ addVisited:[], addFrontier:[], remFrontier:[], addDead:[],
                    path: idleA.path, parked: idleA.parked, stats: idleA.stats });
-  }
   var idleL = framesL[framesL.length-1];
-  while(framesL.length < ticks){
+  while(framesL.length < ticks)
     framesL.push({ addVisited:[], addFrontier:[], remFrontier:[], addDead:[],
                    path: idleL.path, parked: idleL.parked, stats: idleL.stats });
-  }
   return { framesA: framesA, framesL: framesL, ticks: ticks, grid: grid, START: START, GOAL: GOAL };
 }
 
+// =============== playback ===============
 var recording = null;
 var playbackIdx = -1;
 var paused = false;
@@ -845,17 +804,12 @@ function advanceToFrame(target){
     var fl = recording.framesL[playbackIdx];
     applyFrame(playbackA, fa);
     applyFrame(playbackL, fl);
-    currentA.path = fa.path;
-    currentA.parked = fa.parked;
-    currentA.stats = fa.stats;
-    currentL.path = fl.path;
-    currentL.parked = fl.parked;
-    currentL.stats = fl.stats;
+    currentA.path = fa.path; currentA.parked = fa.parked; currentA.stats = fa.stats;
+    currentL.path = fl.path; currentL.parked = fl.parked; currentL.stats = fl.stats;
   }
 }
 function resetPlayback(){
-  playbackIdx = -1;
-  tickAccumulator = 0;
+  playbackIdx = -1; tickAccumulator = 0;
   playbackA = { visited:{}, frontier:{}, dead:{} };
   playbackL = { visited:{}, frontier:{}, dead:{} };
   currentA = { path:null, parked:null, stats:null };
@@ -863,14 +817,15 @@ function resetPlayback(){
   advanceToFrame(0);
 }
 
+// =============== rendering ===============
 var cA = document.getElementById('cA');
 var cL = document.getElementById('cL');
 var ctxA = cA.getContext('2d');
 var ctxL = cL.getContext('2d');
 
 var COLOR = {
-  wall: '#555', open: '#000', start: '#0a0', goal: '#c0c',
-  frontier: '#ff0', parked: '#f80', visited: '#2a4a7a', path: '#0ff', dead: '#a00'
+  wall:'#555', open:'#000', start:'#0a0', goal:'#c0c',
+  frontier:'#ff0', parked:'#f80', visited:'#2a4a7a', path:'#0ff', dead:'#a00'
 };
 
 function draw(ctx, g, view, path, parked){
@@ -918,23 +873,12 @@ function fmtStats(stats){
 function renderCurrent(){
   draw(ctxA, recording.grid, playbackA, currentA.path, currentA.parked);
   draw(ctxL, recording.grid, playbackL, currentL.path, currentL.parked);
-
-  // If playback finished, always show the FINAL recorded stats so the
-  // alg time is the frozen end-of-run value regardless of playback speed.
-  var showA = finished
-    ? recording.framesA[recording.framesA.length - 1].stats
-    : currentA.stats;
-  var showL = finished
-    ? recording.framesL[recording.framesL.length - 1].stats
-    : currentL.stats;
-
+  var showA = finished ? recording.framesA[recording.framesA.length - 1].stats : currentA.stats;
+  var showL = finished ? recording.framesL[recording.framesL.length - 1].stats : currentL.stats;
   document.getElementById('sA').innerHTML = fmtStats(showA);
   document.getElementById('sL').innerHTML = fmtStats(showL);
-
-  // Wall-clock metadata, fixed for this recording.
   if(recording && recording.computeMs !== undefined){
-    var meta = 'wall clock (record + validate, whole run): <b>' +
-               fmtTime(recording.computeMs) + '</b>';
+    var meta = 'wall clock (record + validate): <b>' + fmtTime(recording.computeMs) + '</b>';
     document.getElementById('metaA').innerHTML = meta;
     document.getElementById('metaL').innerHTML = meta;
   }
@@ -994,8 +938,7 @@ function buildAndPlay(){
     recording = buildRecording();
     var computeMs = performance.now() - t0;
     recording.computeMs = computeMs;
-    banner.textContent = 'Recorded in ' + fmtTime(computeMs) +
-                         ' - ' + recording.ticks + ' frames';
+    banner.textContent = 'Recorded in ' + fmtTime(computeMs) + ' - ' + recording.ticks + ' frames';
     setTimeout(function(){ banner.style.display = 'none'; }, 2000);
     resetPlayback();
     paused = false; finished = false; lastFrameTime = 0;
@@ -1018,8 +961,7 @@ function loop(now){
   var lastIdx = recording.ticks - 1;
   if(PLAYBACK_SPEED >= 9999){
     advanceToFrame(lastIdx);
-    finished = true;
-    renderCurrent();
+    finished = true; renderCurrent();
     document.getElementById('pauseBtn').innerText = 'Done';
     return;
   }
@@ -1030,8 +972,7 @@ function loop(now){
   var target = playbackIdx + advanceBy;
   if(target >= lastIdx){
     advanceToFrame(lastIdx);
-    finished = true;
-    renderCurrent();
+    finished = true; renderCurrent();
     document.getElementById('pauseBtn').innerText = 'Done';
     return;
   }
@@ -1039,6 +980,7 @@ function loop(now){
   renderCurrent();
 }
 
+// =============== mass test ===============
 var MASS_N = 12;
 var MASS_MIN_TIME_MS = 5;
 var MASS_MAX_REPS = 30;
@@ -1047,10 +989,7 @@ var lastSeeds = null;
 function runOneOnce(factory, isLSB){
   var algo = factory();
   var iters = 0;
-  while(!algo.done && iters < MASS_MAX_ITERS){
-    algo.step(BUDGET_PER_TICK);
-    iters++;
-  }
+  while(!algo.done && iters < MASS_MAX_ITERS){ algo.step(BUDGET_PER_TICK); iters++; }
   var s = getStats(algo, isLSB);
   return { stats: s, algMs: algo.algMs, backtracks: s.backtracks, parks: s.parks, resumes: s.resumes, kills: s.kills };
 }
@@ -1058,8 +997,7 @@ function runBench(factory, isLSB){
   var totalMs = 0, reps = 0, last = null;
   while(reps < MASS_MAX_REPS){
     last = runOneOnce(factory, isLSB);
-    totalMs += last.algMs;
-    reps++;
+    totalMs += last.algMs; reps++;
     if(totalMs >= MASS_MIN_TIME_MS) break;
   }
   return {
@@ -1163,9 +1101,8 @@ function massTest(reuse){
     for(var mi=0; mi<MAZE_TYPES.length; mi++){
       var t2 = MAZE_TYPES[mi];
       var sub = [];
-      for(var si=0; si<rows.length; si++){
+      for(var si=0; si<rows.length; si++)
         if(rows[si].type === t2.name && rows[si].aSuccess && rows[si].lSuccess) sub.push(rows[si]);
-      }
       if(sub.length === 0){ txt += '  ' + pad(t2.name, 9) + '  (none)\n'; continue; }
       var aAvgSum = 0, lAvgSum = 0, lBTSum = 0;
       for(var xi=0; xi<sub.length; xi++){
