@@ -28,6 +28,9 @@
   <button onclick="setScenario('r020')">Random 0.20</button>
   <button onclick="setScenario('r030')">Random 0.30</button>
   <button onclick="setScenario('r038')">Dense 0.38</button>
+  <button onclick="setScenario('maze1')">Perfect maze #1</button>
+  <button onclick="setScenario('maze2')">Perfect maze #2</button>
+  <button onclick="setScenario('maze3')">Perfect maze #3</button>
   <button onclick="togglePause()" id="pauseBtn">Pause</button>
   <button onclick="restart()">Restart</button>
 </div>
@@ -48,9 +51,9 @@
 <div class="legend panel">
   <span class="sw" style="background:#0a0"></span>start
   <span class="sw" style="background:#c0c"></span>goal
-  <span class="sw" style="background:#666"></span>wall
+  <span class="sw" style="background:#555"></span>wall
   <span class="sw" style="background:#ff0"></span>frontier
-  <span class="sw" style="background:#369"></span>visited
+  <span class="sw" style="background:#2a4a7a"></span>visited
   <span class="sw" style="background:#0ff"></span>final path
   <span class="sw" style="background:#a00"></span>dead (LSB scars)
 </div>
@@ -58,16 +61,17 @@
 <script>
 // ---------- config ----------
 const W = 60, H = 30;
-const CELL = Math.floor(480 / W); // 8
+const CELL = Math.floor(480 / W);
 const START = [0, 0];
 const GOAL = [W-1, H-1];
-let TICK_DELAY = 30; // ms
+let TICK_DELAY = 30;
 let BUDGET_PER_TICK = 6;
 
 // ---------- maze gen ----------
 function rng(seed){ let s=seed>>>0; return ()=>{ s=(s*1664525+1013904223)>>>0; return s/4294967296; }; }
 
 function makeOpen(){ return Array.from({length:H},()=>Array(W).fill(0)); }
+
 function makeSparse(){
   const g = Array.from({length:H},()=>Array(W).fill(0));
   const blocks = [[10,5,16,24],[26,12,32,28],[36,4,44,14],[48,18,58,26]];
@@ -76,11 +80,50 @@ function makeSparse(){
   g[0][0]=0; g[H-1][W-1]=0;
   return g;
 }
+
 function makeRandom(density, seed){
   const r = rng(seed);
   const g = Array.from({length:H},()=>Array(W).fill(0));
   for(let y=0;y<H;y++) for(let x=0;x<W;x++) if(r()<density) g[y][x]=1;
   g[0][0]=0; g[H-1][W-1]=0;
+  return g;
+}
+
+// Perfect maze (recursive backtracker) — same topology as mazegenerator.net.
+function makePerfectMaze(seed){
+  const r = rng(seed);
+  const g = Array.from({length:H},()=>Array(W).fill(1));
+  const rx = Math.floor((W-1)/2);
+  const ry = Math.floor((H-1)/2);
+  const visited = Array.from({length:ry},()=>Array(rx).fill(false));
+  const stack = [[0,0]];
+  visited[0][0]=true;
+  g[1][1]=0;
+  while(stack.length){
+    const [cx,cy] = stack[stack.length-1];
+    const dirs = [[1,0],[-1,0],[0,1],[0,-1]];
+    for(let i=dirs.length-1;i>0;i--){ const j=Math.floor(r()*(i+1)); [dirs[i],dirs[j]]=[dirs[j],dirs[i]]; }
+    let moved=false;
+    for(const [dx,dy] of dirs){
+      const nx=cx+dx, ny=cy+dy;
+      if(nx<0||nx>=rx||ny<0||ny>=ry) continue;
+      if(visited[ny][nx]) continue;
+      g[cy*2+1+dy][cx*2+1+dx]=0;
+      g[ny*2+1][nx*2+1]=0;
+      visited[ny][nx]=true;
+      stack.push([nx,ny]);
+      moved=true;
+      break;
+    }
+    if(!moved) stack.pop();
+  }
+  // open corners + punch entrances
+  g[0][0]=0;
+  g[H-1][W-1]=0;
+  if(g[1][0]!==0) g[1][0]=0;
+  if(g[0][1]!==0) g[0][1]=0;
+  if(g[H-2][W-1]!==0) g[H-2][W-1]=0;
+  if(g[H-1][W-2]!==0) g[H-1][W-2]=0;
   return g;
 }
 
@@ -98,7 +141,7 @@ function neighbors(grid,c){
 }
 function key(c){ return c[1]*W+c[0]; }
 
-// Bresenham line cells from a to b, excluding a
+// Bresenham line cells from a to b, excluding a, including b
 function lineCells(a,b){
   let [x0,y0]=a, [x1,y1]=b;
   const cells=[];
@@ -133,7 +176,6 @@ class AStar {
   step(budget){
     for(let i=0;i<budget && !this.done;i++){
       if(!this.open.length){ this.done=true; return; }
-      // pop min f
       let bi=0; for(let j=1;j<this.open.length;j++) if(this.open[j][0]<this.open[bi][0]) bi=j;
       const [f,g,c]=this.open.splice(bi,1)[0];
       if(this.closed.has(key(c))){ i--; continue; }
@@ -170,7 +212,7 @@ class LSB {
   constructor(grid, opts={}){
     this.grid=grid; this.name="LSB";
     this.max_branches = opts.max_branches ?? 20;
-    this.stag_limit = opts.stag_limit ?? 60;
+    this.stag_limit = opts.stag_limit ?? 200;
     this.scar_threshold = opts.scar_threshold ?? 2.5;
     this.scar_decay = opts.scar_decay ?? 0.004;
     this.lookahead = opts.lookahead ?? 3;
@@ -191,7 +233,6 @@ class LSB {
       this.tick++;
       const next=[];
       for(const b of this.branches){
-        // redraw line
         const ray = lineCells(b.cell, GOAL);
         let blocked=null;
         for(let k=this.lookahead;k<ray.length;k++){
@@ -206,10 +247,8 @@ class LSB {
             this.done=true; this.path=b.path; return;
           }
         } else {
-          // shift: neighbors of blocker
           const cands = neighbors(this.grid, blocked).filter(n=>!(n[0]===b.cell[0]&&n[1]===b.cell[1]));
           if(!cands.length){
-            // dead end
             for(const c of b.path){ this._scarAdd(c,1); this.dead.add(key(c)); }
             continue;
           }
@@ -227,7 +266,6 @@ class LSB {
         }
         if(!stepCell) continue;
 
-        // scar avoidance
         if(this._scarGet(stepCell)>this.scar_threshold &&
            manhattan(stepCell,GOAL)>=b.best){
           const alt = neighbors(this.grid, stepCell).filter(c=>this._scarGet(c)<=this.scar_threshold);
@@ -237,7 +275,6 @@ class LSB {
           }
         }
 
-        // commit
         b.path = b.path.concat([stepCell]);
         b.last = b.cell;
         b.cell = stepCell;
@@ -285,7 +322,7 @@ const COLOR = {
 };
 
 function draw(ctx, grid, algo){
-  ctx.fillStyle = COLOR.open; ctx.fillRect(0,0,cA.width,cA.height);
+  ctx.fillStyle = COLOR.open; ctx.fillRect(0,0,ctx.canvas.width,ctx.canvas.height);
   const pathSet = algo.path ? new Set(algo.path.map(key)) : null;
   for(let y=0;y<H;y++){
     for(let x=0;x<W;x++){
@@ -319,16 +356,23 @@ function setScenario(name){
   else if(name==='r020') grid = makeRandom(0.20, 1);
   else if(name==='r030') grid = makeRandom(0.30, 2);
   else if(name==='r038') grid = makeRandom(0.38, 3);
+  else if(name==='maze1') grid = makePerfectMaze(1);
+  else if(name==='maze2') grid = makePerfectMaze(7);
+  else if(name==='maze3') grid = makePerfectMaze(42);
   restart();
 }
+
 function restart(){
   a = new AStar(grid);
   l = new LSB(grid);
   tick=0; t0=performance.now();
+  paused=false;
+  document.getElementById('pauseBtn').innerText = 'Pause';
   draw(ctxA, grid, a); draw(ctxL, grid, l);
   document.getElementById('sA').innerHTML = stats(a);
   document.getElementById('sL').innerHTML = stats(l);
 }
+
 function togglePause(){ paused=!paused; document.getElementById('pauseBtn').innerText = paused?'Resume':'Pause'; }
 
 function loop(now){
@@ -354,7 +398,7 @@ function loop(now){
   }
 }
 
-setScenario('sparse');
+setScenario('maze1');
 requestAnimationFrame(loop);
 </script>
 </body>
