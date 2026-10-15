@@ -96,8 +96,9 @@ var MASS_BUDGET = 8;
 var TICK_DELAY = 16;
 var PLAYBACK_SPEED = 1;
 
-var CUT_CHECK_INTERVAL = 500;    // ticks between cut detection runs
-var CUT_MIN_VISITED_DELTA = 100; // require this many new visits to re-check
+var CUT_CHECK_INTERVAL = 1000;
+var CUT_MIN_VISITED_DELTA = 200;
+var FORK_COOLDOWN = 4;      // branch must move this many cells between forks
 
 var START = [0, 0];
 var GOAL = [W-1, H-1];
@@ -386,10 +387,14 @@ function Branch(cell, path, cameFrom){
   this.stack = [];
   this.parked = false;
   this.scoreCache = 0;
+  this.depth = this.path.length - 1;
+  this.lastForkDepth = -999;
 }
 Branch.prototype.clone = function(){
   var b = new Branch(this.cell, this.path, this.cameFrom);
   b.scoreCache = this.scoreCache;
+  b.depth = this.depth;
+  b.lastForkDepth = this.lastForkDepth;
   for(var i=0; i<this.stack.length; i++){
     var s = this.stack[i];
     b.stack.push({
@@ -423,6 +428,22 @@ function LSB(g, start, goal){
   this.dtg = dtg;
   this.goalK = goal[1]*W + goal[0];
 
+  // Precompute open-neighbor count for every cell.
+  var openCount = new Uint8Array(N);
+  for(var yy=0; yy<H; yy++){
+    var bb = yy * W;
+    for(var xx=0; xx<W; xx++){
+      if(g[yy][xx] !== 0) continue;
+      var c = 0;
+      if(xx + 1 < W && g[yy][xx + 1] === 0) c++;
+      if(xx - 1 >= 0 && g[yy][xx - 1] === 0) c++;
+      if(yy + 1 < H && g[yy + 1][xx] === 0) c++;
+      if(yy - 1 >= 0 && g[yy - 1][xx] === 0) c++;
+      openCount[bb + xx] = c;
+    }
+  }
+  this.openCount = openCount;
+
   this.visited   = new Uint8Array(N);
   this.generated = new Uint8Array(N);
   this.expanded  = new Uint8Array(N);
@@ -447,11 +468,13 @@ function LSB(g, start, goal){
   this.backtracks = 0; this.parks = 0; this.resumes = 0; this.kills = 0;
   this.earlyDeaths = 0;
 
-  // cut state
   this.cutCheckTick = 0;
   this.lastCutCheckVisited = 0;
   this.cutsMade = 0;
   this.cutCellsPruned = 0;
+
+  this.layerMedian = 0;
+  this.parkedFull = false;
 
   this.algMs = 0;
 }
@@ -475,24 +498,15 @@ LSB.prototype._unpark = function(n){
   }
 };
 
+// Uses precomputed layerMedian; skips if parked is full or too few active.
 LSB.prototype._shouldPark = function(b){
   if(this.branches.length <= this.minActive) return false;
-  if(this.parked.length >= this.max_parked) return false;
-  var scored = [];
-  for(var i=0; i<this.branches.length; i++) scored.push(this.branches[i].scoreCache);
-  scored.sort(function(a,b){ return a - b; });
-  var median = scored[Math.floor(scored.length/2)];
-  return b.scoreCache > median * 1.5;
+  if(this.parkedFull) return false;
+  return b.scoreCache > this.layerMedian * 1.5;
 };
 
-// =============== CUT DETECTION ===============
-// Detect when visited cells form a separator across the maze (top-bottom
-// or left-right). Once a separator exists, unvisited cells that can't reach
-// the goal without crossing visited cells are topologically useless — kill
-// them permanently.
 LSB.prototype._checkForCuts = function(){
   var N = W * H;
-  // Skip if not enough new ground since last check
   if(this._visitedCount - this.lastCutCheckVisited < CUT_MIN_VISITED_DELTA) return;
   this.lastCutCheckVisited = this._visitedCount;
 
@@ -509,7 +523,6 @@ LSB.prototype._checkForCuts = function(){
     if(ra !== rb) parent[ra] = rb;
   }
 
-  // Union adjacent visited cells
   for(var y=0; y<H; y++){
     var base = y * W;
     for(var x=0; x<W; x++){
@@ -520,7 +533,6 @@ LSB.prototype._checkForCuts = function(){
     }
   }
 
-  // Component bounding boxes
   var bbox = {};
   for(var yy=0; yy<H; yy++){
     var b2 = yy * W;
@@ -539,17 +551,15 @@ LSB.prototype._checkForCuts = function(){
     }
   }
 
-  // Which components span the full maze?
   var cutRoots = {};
   var anyCut = false;
-  for(var r in bbox){
-    var b3 = bbox[r];
-    if(b3.minY === 0 && b3.maxY === H - 1){ cutRoots[r] = 'V'; anyCut = true; }
-    else if(b3.minX === 0 && b3.maxX === W - 1){ cutRoots[r] = 'H'; anyCut = true; }
+  for(var r2 in bbox){
+    var b3 = bbox[r2];
+    if(b3.minY === 0 && b3.maxY === H - 1){ cutRoots[r2] = 'V'; anyCut = true; }
+    else if(b3.minX === 0 && b3.maxX === W - 1){ cutRoots[r2] = 'H'; anyCut = true; }
   }
   if(!anyCut) return;
 
-  // Mark all visited cells that belong to a cut component
   var inCut = new Uint8Array(N);
   for(var y3=0; y3<H; y3++){
     var b4 = y3 * W;
@@ -561,16 +571,14 @@ LSB.prototype._checkForCuts = function(){
     }
   }
 
-  // BFS from goal through open cells NOT in cut. Anything open, unvisited,
-  // and unreached by this BFS cannot reach the goal without crossing a cut
-  // component — meaning it is on the wrong side.
   var goalK = this.goalK;
   var reached = new Uint8Array(N);
-  var queue = [goalK];
+  var queue = new Int32Array(N);
+  var qh = 0, qt = 0;
+  queue[qt++] = goalK;
   reached[goalK] = 1;
-  var head = 0;
-  while(head < queue.length){
-    var kc = queue[head++];
+  while(qh < qt){
+    var kc = queue[qh++];
     var cx = kc % W, cy = (kc - cx) / W;
     for(var di=0; di<4; di++){
       var nx2 = cx + N4[di][0], ny2 = cy + N4[di][1];
@@ -578,13 +586,12 @@ LSB.prototype._checkForCuts = function(){
       if(this.grid[ny2][nx2] !== 0) continue;
       var nk = ny2 * W + nx2;
       if(reached[nk]) continue;
-      if(inCut[nk]) continue;   // can't route through cut cells
+      if(inCut[nk]) continue;
       reached[nk] = 1;
-      queue.push(nk);
+      queue[qt++] = nk;
     }
   }
 
-  // Mark wrong-side cells dead
   var pruned = 0;
   for(var y4=0; y4<H; y4++){
     var b5 = y4 * W;
@@ -606,8 +613,6 @@ LSB.prototype._checkForCuts = function(){
   if(pruned > 0){
     this.cutsMade++;
     this.cutCellsPruned += pruned;
-    // Clear the frontier of any branch now sitting on a wrong-side cell
-    // (they'll die on their next step anyway, but this tidies state)
   }
 };
 
@@ -626,6 +631,14 @@ LSB.prototype.step = function(budget){
     var novelBefore = this._visitedCount;
     var oldBranches = this.branches;
     var ol = oldBranches.length;
+
+    // Per-layer median (was per-branch, now once)
+    var scores = new Array(ol);
+    for(var si=0; si<ol; si++) scores[si] = oldBranches[si].scoreCache;
+    scores.sort(function(a,b){ return a - b; });
+    this.layerMedian = scores[Math.floor(ol / 2)];
+    this.parkedFull = this.parked.length >= this.max_parked;
+
     var next = [];
     var stop = false;
     for(var bi=0; bi<ol; bi++){
@@ -634,7 +647,10 @@ LSB.prototype.step = function(budget){
     }
     if(stop) break;
 
-    next.sort(function(a,b){ return a.scoreCache - b.scoreCache; });
+    // Only sort if we're actually going to trim
+    if(next.length > this.max_branches){
+      next.sort(function(a,b){ return a.scoreCache - b.scoreCache; });
+    }
     var overflow = [];
     if(next.length > this.max_branches){
       overflow = next.slice(this.max_branches);
@@ -678,7 +694,6 @@ LSB.prototype.step = function(budget){
       }
     }
 
-    // Cut check runs occasionally. It's O(N), so keep the interval high.
     if(this.tick - this.cutCheckTick >= CUT_CHECK_INTERVAL){
       this.cutCheckTick = this.tick;
       this._checkForCuts();
@@ -693,6 +708,7 @@ LSB.prototype.stepBranch = function(b, next){
 
   var x0 = b.cell[0], y0 = b.cell[1];
   var grid = this.grid;
+  var openCount = this.openCount;
   var opts = [];
 
   for(var i=0; i<4; i++){
@@ -702,24 +718,15 @@ LSB.prototype.stepBranch = function(b, next){
     if(grid[ny][nx] !== 0) continue;
     var kk = ny * W + nx;
     if(b.pathSet[kk]) continue;
-
     if(kk === this.goalK){ opts.push([nx, ny, kk]); continue; }
     if(this.dead[kk]) continue;
-
-    var openCount = 0;
-    if(nx + 1 < W && grid[ny][nx + 1] === 0) openCount++;
-    if(nx - 1 >= 0 && grid[ny][nx - 1] === 0) openCount++;
-    if(ny + 1 < H && grid[ny + 1][nx] === 0) openCount++;
-    if(ny - 1 >= 0 && grid[ny - 1][nx] === 0) openCount++;
-
-    if(openCount <= 1){
+    if(openCount[kk] <= 1){
       this.scar[kk] += 1.0;
       this.scarKeys[kk] = 1;
       this.dead[kk] = 1;
       this.earlyDeaths++;
       continue;
     }
-
     opts.push([nx, ny, kk]);
   }
 
@@ -733,7 +740,10 @@ LSB.prototype.stepBranch = function(b, next){
   opts.sort(function(p, q){ return dtg[p[2]] - dtg[q[2]]; });
   var primary = opts[0];
 
-  if(opts.length > 1){
+  // Fork only if cooldown elapsed
+  var canFork = (b.depth - b.lastForkDepth) >= FORK_COOLDOWN;
+
+  if(opts.length > 1 && canFork){
     var bestD = dtg[primary[2]];
     var tiedCount = 1;
     for(var ti=1; ti<opts.length; ti++) if(Math.abs(dtg[opts[ti][2]] - bestD) < this.tryEps) tiedCount++;
@@ -754,7 +764,9 @@ LSB.prototype.stepBranch = function(b, next){
         nb.pathSet[nt[2]] = 1;
         nb.cameFrom = b.cell;
         nb.cell = nt; nb.k = nt[2];
-        nb.scoreCache = dtg[nt[2]] + 0.25 * nb.path.length;
+        nb.depth = b.depth + 1;
+        nb.lastForkDepth = nb.depth;
+        nb.scoreCache = dtg[nt[2]] + 0.25 * nb.depth;
         this._addGenerated(nt[2]);
         next.push(nb);
         wrote++;
@@ -765,6 +777,7 @@ LSB.prototype.stepBranch = function(b, next){
         nextIdx: tiedCount,
         pathIdx: b.path.length - 1
       });
+      b.lastForkDepth = b.depth;
     } else {
       b.stack.push({
         cell: b.cell, k: b.k,
@@ -773,13 +786,21 @@ LSB.prototype.stepBranch = function(b, next){
         pathIdx: b.path.length - 1
       });
     }
+  } else if(opts.length > 1){
+    b.stack.push({
+      cell: b.cell, k: b.k,
+      options: opts,
+      nextIdx: 1,
+      pathIdx: b.path.length - 1
+    });
   }
 
   b.path.push(primary);
   b.pathSet[primary[2]] = 1;
   b.cameFrom = b.cell;
   b.cell = primary; b.k = primary[2];
-  b.scoreCache = dtg[primary[2]] + 0.25 * b.path.length;
+  b.depth++;
+  b.scoreCache = dtg[primary[2]] + 0.25 * b.depth;
   this._addGenerated(primary[2]);
 
   if(b.k === this.goalK){ this.done = true; this.path = b.path; return; }
@@ -801,6 +822,7 @@ LSB.prototype.backtrack = function(b, next){
       var nt = top.options[top.nextIdx];
       top.nextIdx++;
       if(this.dead[nt[2]] && nt[2] !== this.goalK) continue;
+
       for(var i = b.path.length - 1; i > top.pathIdx; i--){
         var c = b.path[i];
         b.pathSet[c[1]*W + c[0]] = 0;
@@ -810,7 +832,8 @@ LSB.prototype.backtrack = function(b, next){
       b.pathSet[nt[2]] = 1;
       b.cameFrom = top.cell;
       b.cell = nt; b.k = nt[2];
-      b.scoreCache = this.dtg[nt[2]] + 0.25 * b.path.length;
+      b.depth = b.path.length - 1;
+      b.scoreCache = this.dtg[nt[2]] + 0.25 * b.depth;
       this._addGenerated(nt[2]);
       if(b.k === this.goalK){ this.done = true; this.path = b.path; return false; }
       return false;
