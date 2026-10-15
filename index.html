@@ -17,6 +17,7 @@
   button { background:#2a2a2a; color:#eee; border:1px solid #444; padding:8px 12px;
            border-radius:5px; font-family:monospace; font-size:13px; margin:3px; }
   button:active { background:#444; }
+  button.speed-on { background:#3a5a3a; border-color:#7a7; }
   .legend { font-size:11px; color:#888; margin-top:6px; }
   .sw { display:inline-block; width:10px; height:10px; vertical-align:middle; margin-right:4px; }
   pre#results { background:#0a0a0a; padding:10px; border-radius:6px; font-size:11px;
@@ -24,6 +25,7 @@
                 border:1px solid #333; white-space:pre; }
   .banner { background:#222; padding:6px 10px; border-radius:4px; font-size:12px;
             color:#ff0; margin-bottom:6px; display:none; }
+  .speed-label { color:#888; font-size:12px; margin-right:6px; }
 </style>
 </head>
 <body>
@@ -44,6 +46,18 @@
   <button onclick="restartSame()">Replay</button>
   <button style="background:#333;border-color:#666" onclick="massTest(false)">▶ Mass test (12)</button>
   <button style="background:#333;border-color:#666" onclick="massTest(true)">↺ Reuse last seeds</button>
+</div>
+
+<div class="panel" style="margin-bottom:8px;">
+  <span class="speed-label">Speed:</span>
+  <button class="speed-btn" data-sp="0.1"  onclick="setSpeed(0.1)">0.1×</button>
+  <button class="speed-btn" data-sp="0.25" onclick="setSpeed(0.25)">0.25×</button>
+  <button class="speed-btn" data-sp="0.5"  onclick="setSpeed(0.5)">0.5×</button>
+  <button class="speed-btn" data-sp="1"    onclick="setSpeed(1)">1×</button>
+  <button class="speed-btn" data-sp="2"    onclick="setSpeed(2)">2×</button>
+  <button class="speed-btn" data-sp="4"    onclick="setSpeed(4)">4×</button>
+  <button class="speed-btn" data-sp="16"   onclick="setSpeed(16)">16×</button>
+  <button class="speed-btn" data-sp="9999" onclick="setSpeed(9999)">⚡ instant</button>
 </div>
 
 <div class="row">
@@ -78,10 +92,11 @@
 // ===================================================================
 const W = 60, H = 30;
 const CELL = Math.floor(480 / W);
-const TICK_DELAY = 16;
-const PLAYBACK_SPEED = 3;
-const BUDGET_PER_TICK = 8;
+const TICK_DELAY = 16;              // ms per frame
+const BUDGET_PER_TICK = 8;          // algo steps per recorded tick
 const RECORD_MAX_TICKS = 5000;
+
+let PLAYBACK_SPEED = 1;             // recorded ticks per frame (can be <1)
 
 let START = [0, 0];
 let GOAL  = [W-1, H-1];
@@ -210,7 +225,6 @@ function neighbors(grid,c){
 }
 function key(c){ return c[1]*W+c[0]; }
 
-// Path validation: returns {ok, reason}
 function validatePath(grid, path, start, goal){
   if(!path || path.length === 0) return {ok:false, reason:'empty path'};
   if(path[0][0] !== start[0] || path[0][1] !== start[1])
@@ -220,15 +234,23 @@ function validatePath(grid, path, start, goal){
     return {ok:false, reason:'does not end at GOAL'};
   for(let i=0; i<path.length; i++){
     const [x,y] = path[i];
-    if(x<0||x>=W||y<0||y>=H) return {ok:false, reason:'out of bounds at index '+i};
-    if(grid[y][x] !== 0) return {ok:false, reason:'crosses wall at index '+i};
+    if(x<0||x>=W||y<0||y>=H) return {ok:false, reason:'out of bounds at '+i};
+    if(grid[y][x] !== 0) return {ok:false, reason:'crosses wall at '+i};
     if(i>0){
       const [px,py] = path[i-1];
       if(Math.abs(x-px)+Math.abs(y-py) !== 1)
-        return {ok:false, reason:'non-adjacent cells at index '+i};
+        return {ok:false, reason:'non-adjacent at '+i};
     }
   }
   return {ok:true};
+}
+
+// ---- time formatting ----
+function fmtTime(ms){
+  if(ms < 0.001) return (ms*1e6).toFixed(0)+'ns';
+  if(ms < 1)     return (ms*1000).toFixed(0)+'μs';
+  if(ms < 1000)  return ms.toFixed(2)+'ms';
+  return (ms/1000).toFixed(3)+'s';
 }
 
 // ===================================================================
@@ -268,12 +290,11 @@ class AStar {
     this.g = new Map(); this.g.set(key(start), 0);
     this.came = new Map();
     this.closed = new Set();
-    this.visited  = new Set([key(start)]);  // for drawing
-    this.generated = new Set([key(start)]); // cells placed into the frontier
-    this.expanded  = new Set();             // cells whose neighbors were examined
+    this.visited  = new Set([key(start)]);
+    this.generated = new Set([key(start)]);
+    this.expanded  = new Set();
     this.frontier = new Set([key(start)]);
     this.done=false; this.exhausted=false; this.path=null;
-    this.expandedCount = 0; // raw pop count for reference
     this.algMs = 0;
   }
   step(budget){
@@ -287,7 +308,6 @@ class AStar {
       this.closed.add(kc);
       this.visited.add(kc);
       this.expanded.add(kc);
-      this.expandedCount++;
       this.frontier.delete(kc);
       spent++;
       if(c[0]===this.goal[0] && c[1]===this.goal[1]){
@@ -328,7 +348,7 @@ class Branch {
     this.pathSet = new Set();
     for(const c of this.path) this.pathSet.add(key(c));
     this.stack = [];
-    this.bestEver = manhattan(cell, GOAL);   // historical best distance to goal
+    this.bestEver = manhattan(cell, GOAL);
     this.parkCount = 0;
     this.parked = false;
   }
@@ -344,11 +364,7 @@ class Branch {
     }));
     return b;
   }
-  // Ranking score: current-position-focused, plus a path-length penalty.
-  // Lower is better.
-  score(){
-    return euclid(this.cell, GOAL) + 0.25 * this.path.length;
-  }
+  score(){ return euclid(this.cell, GOAL) + 0.25 * this.path.length; }
 }
 
 class LSB {
@@ -359,7 +375,6 @@ class LSB {
     this.scar_threshold      = opts.scar_threshold      ?? 2.5;
     this.scar_decay          = opts.scar_decay          ?? 0.004;
     this.tryEps              = opts.tryEps              ?? 0.5;
-    this.progressThreshold   = opts.progressThreshold   ?? 100;
     this.maxParksPerBranch   = opts.maxParksPerBranch   ?? 3;
     this.minActive           = opts.minActive           ?? 4;
     this.stallThreshold      = opts.stallThreshold      ?? 200;
@@ -372,12 +387,10 @@ class LSB {
     this.tick=0;
     this.lastNovelTick = 0;
     this.backtracks=0; this.parks=0; this.resumes=0; this.kills=0;
-    this.stepsWithoutProgress = 0;
 
-    // Metrics (parallel to A*)
-    this.visited   = new Set([key(start)]); // for drawing
+    this.visited   = new Set([key(start)]);
     this.generated = new Set([key(start)]);
-    this.expanded  = new Set();             // cells whose neighbors were examined
+    this.expanded  = new Set();
 
     this.frontier = new Set([key(start)]);
     this.dead = new Set();
@@ -391,9 +404,7 @@ class LSB {
     for(let i=0; i<budget && !this.done; i++){
       if(this.branches.length === 0){
         if(this.parked.length === 0){
-          this.done = true;
-          this.exhausted = true;
-          break;
+          this.done = true; this.exhausted = true; break;
         }
         this._unpark(this.minActive);
       }
@@ -406,26 +417,20 @@ class LSB {
         if(this.done) break outer;
       }
 
-      // Sort by score, park overflow instead of dropping
       next.sort((a,b) => a.score() - b.score());
       const keep = next.slice(0, this.max_branches);
       const overflow = next.slice(this.max_branches);
       this.branches = keep;
       for(const b of overflow){
         if(this.parked.length < this.max_parked){
-          b.parked = true;
-          this.parked.push(b);
-          this.parks++;
+          b.parked = true; this.parked.push(b); this.parks++;
         } else {
-          // Parked queue full — kill worst of {this branch, worst parked}
           const worstParked = this.parked[this.parked.length - 1];
           if(worstParked && b.score() < worstParked.score()){
             this.parked.pop();
             for(const c of worstParked.path){ this._scarAdd(c, 0.5); this.dead.add(key(c)); }
             this.kills++;
-            b.parked = true;
-            this.parked.push(b);
-            this.parks++;
+            b.parked = true; this.parked.push(b); this.parks++;
           } else {
             for(const c of b.path){ this._scarAdd(c, 0.5); this.dead.add(key(c)); }
             this.kills++;
@@ -434,7 +439,6 @@ class LSB {
       }
       this.frontier = new Set(this.branches.map(b => key(b.cell)));
 
-      // Stall detection — resume some parked branches periodically
       const novelAfter = this.visited.size;
       if(novelAfter > novelBefore){
         this.lastNovelTick = this.tick;
@@ -476,23 +480,16 @@ class LSB {
     if(b.cell[0]===this.goal[0] && b.cell[1]===this.goal[1]){
       this.done=true; this.path=b.path; return;
     }
-
-    // Expansion event: we are about to examine this cell's neighbors.
-    // Idempotent via Set.
     this.expanded.add(key(b.cell));
-
     const opts = neighbors(this.grid, b.cell).filter(n => !b.pathSet.has(key(n)));
-
     if(opts.length === 0){
       const dead = this.backtrack(b, next);
       if(dead) return;
       next.push(b);
       return;
     }
-
     opts.sort((p,q) => euclid(p, this.goal) - euclid(q, this.goal));
     const primary = opts[0];
-
     if(opts.length > 1){
       const bestD = euclid(primary, this.goal);
       const tied = opts.filter(o => Math.abs(euclid(o, this.goal) - bestD) < this.tryEps);
@@ -511,7 +508,6 @@ class LSB {
           nb.cameFrom = b.cell;
           nb.cell = nt;
           nb.bestEver = Math.min(nb.bestEver, manhattan(nt, this.goal));
-          // Fork destination = generated, not yet expanded
           this._addGenerated(nt);
           next.push(nb);
         }
@@ -530,7 +526,6 @@ class LSB {
         });
       }
     }
-
     b.path.push(primary);
     b.pathSet.add(key(primary));
     b.cameFrom = b.cell;
@@ -538,11 +533,9 @@ class LSB {
     this._addGenerated(primary);
     const d = manhattan(primary, this.goal);
     if(d < b.bestEver) b.bestEver = d;
-
     if(primary[0]===this.goal[0] && primary[1]===this.goal[1]){
       this.done=true; this.path=b.path; return;
     }
-
     if(b.parkCount < this.maxParksPerBranch && this._shouldPark(b)){
       b.parkCount++;
       if(this.parked.length < this.max_parked){
@@ -555,8 +548,6 @@ class LSB {
     next.push(b);
   }
 
-  // Should this branch be parked? Heuristic: its score is far worse than
-  // the median active branch, and it hasn't found a new cell in a while.
   _shouldPark(b){
     if(this.branches.length <= this.minActive) return false;
     const scored = this.branches.map(x => x.score()).sort((a,b)=>a-b);
@@ -596,10 +587,11 @@ class LSB {
 }
 
 // ===================================================================
-// unified snapshot
+// stats snapshot
 // ===================================================================
 function getStats(algo, isLSB){
-  const validPath = algo.path ? validatePath(algo.grid, algo.path, algo.start, algo.goal) : {ok:false, reason:'no path'};
+  const validPath = algo.path ? validatePath(algo.grid, algo.path, algo.start, algo.goal)
+                              : {ok:false, reason:'no path'};
   return {
     expanded:  algo.expanded.size,
     generated: algo.generated ? algo.generated.size : null,
@@ -695,6 +687,7 @@ let playbackIdx = -1;
 let paused = false;
 let finished = false;
 let lastFrameTime = 0;
+let tickAccumulator = 0;
 
 const playbackA = { visited: new Set(), frontier: new Set(), dead: new Set() };
 const playbackL = { visited: new Set(), frontier: new Set(), dead: new Set() };
@@ -721,6 +714,7 @@ function advanceToFrame(target){
 }
 function resetPlayback(){
   playbackIdx = -1;
+  tickAccumulator = 0;
   playbackA.visited.clear(); playbackA.frontier.clear(); playbackA.dead.clear();
   playbackL.visited.clear(); playbackL.frontier.clear(); playbackL.dead.clear();
   currentA = { path: null, parked: null, stats: null };
@@ -770,9 +764,8 @@ function fmtStats(stats){
   let s = `<div class="primary">expanded: <b>${stats.expanded}</b></div>`;
   if(stats.generated !== null) s += `generated: <b>${stats.generated}</b><br>`;
   s += `path: <b>${stats.pathLen ?? '—'}</b>`;
-  if(stats.done) s += stats.pathValid ? ` <span style="color:#6f6">✓valid</span>` : ` <span style="color:#f88">✗${stats.pathReason}</span>`;
-  s += `<br>`;
-  s += `frontier: <b>${stats.frontier}</b><br>`;
+  if(stats.done) s += stats.pathValid ? ` <span style="color:#6f6">✓</span>` : ` <span style="color:#f88">✗</span>`;
+  s += `<br>frontier: <b>${stats.frontier}</b><br>`;
   if(stats.isLSB){
     s += `bt: <b>${stats.backtracks}</b>  parks: <b>${stats.parks}</b>  res: <b>${stats.resumes}</b><br>`;
     s += `kills: <b>${stats.kills}</b>  parked: <b>${stats.parkedCount}</b><br>`;
@@ -780,7 +773,7 @@ function fmtStats(stats){
   s += `done: <b>${stats.done}</b>`;
   if(stats.exhausted) s += ` <span style="color:#f88">(exhausted)</span>`;
   if(stats.done) s += `  success: <b>${stats.success ? 'yes' : 'NO'}</b>`;
-  s += `<br>alg time: <b>${(stats.algMs/1000).toFixed(3)}s</b>`;
+  s += `<br>alg time: <b>${fmtTime(stats.algMs)}</b>`;
   return s;
 }
 
@@ -789,6 +782,17 @@ function renderCurrent(){
   draw(ctxL, recording.grid, playbackL, currentL.path, currentL.parked);
   document.getElementById('sA').innerHTML = fmtStats(currentA.stats);
   document.getElementById('sL').innerHTML = fmtStats(currentL.stats);
+}
+
+// ===================================================================
+// speed control
+// ===================================================================
+function setSpeed(s){
+  PLAYBACK_SPEED = s;
+  document.querySelectorAll('.speed-btn').forEach(btn => {
+    const v = parseFloat(btn.dataset.sp);
+    btn.classList.toggle('speed-on', Math.abs(v - s) < 1e-6);
+  });
 }
 
 // ===================================================================
@@ -824,10 +828,10 @@ function buildAndPlay(){
   setTimeout(() => {
     const t0 = performance.now();
     recording = buildRecording();
-    const computeMs = (performance.now() - t0).toFixed(0);
-    banner.textContent = 'Calculated in ' + computeMs + 'ms — playing ' +
-                         recording.ticks + ' frames';
-    setTimeout(() => { banner.style.display = 'none'; }, 1200);
+    const computeMs = performance.now() - t0;
+    banner.textContent = 'Computed in ' + fmtTime(computeMs) +
+                         ' — playing back ' + recording.ticks + ' frames';
+    setTimeout(() => { banner.style.display = 'none'; }, 1500);
 
     resetPlayback();
     paused = false; finished = false; lastFrameTime = 0;
@@ -848,8 +852,23 @@ function loop(now){
   if(now - lastFrameTime < TICK_DELAY) return;
   lastFrameTime = now;
 
-  const target = playbackIdx + PLAYBACK_SPEED;
   const lastIdx = recording.ticks - 1;
+
+  // instant mode: jump to end immediately
+  if(PLAYBACK_SPEED >= 9999){
+    advanceToFrame(lastIdx);
+    renderCurrent();
+    finished = true;
+    document.getElementById('pauseBtn').innerText = 'Done';
+    return;
+  }
+
+  tickAccumulator += PLAYBACK_SPEED;
+  const advanceBy = Math.floor(tickAccumulator);
+  if(advanceBy <= 0){ renderCurrent(); return; }
+  tickAccumulator -= advanceBy;
+
+  const target = playbackIdx + advanceBy;
   if(target >= lastIdx){
     advanceToFrame(lastIdx);
     renderCurrent();
@@ -862,30 +881,43 @@ function loop(now){
 }
 
 // ===================================================================
-// mass test
+// mass test  (with timing reps)
 // ===================================================================
 const MASS_N = 12;
 const MASS_MAX_ITERS = 20000;
+const MASS_MIN_TIME_MS = 5;   // run until cumulative time exceeds this
+const MASS_MAX_REPS = 30;
 let lastSeeds = null;
 
-function runOne(algo, isLSB){
+function runOneOnce(factory, isLSB){
+  const algo = factory();
   let iters = 0;
   while(!algo.done && iters < MASS_MAX_ITERS){ algo.step(BUDGET_PER_TICK); iters++; }
   const s = getStats(algo, isLSB);
   return {
-    done: algo.done,
-    success: s.success,
-    pathValid: s.pathValid,
-    pathReason: s.pathReason,
-    expanded: s.expanded,
-    generated: s.generated,
-    uniqueVisited: s.uniqueVisited,
-    pathLen: s.pathLen,
-    backtracks: s.backtracks,
-    parks: s.parks,
-    resumes: s.resumes,
-    kills: s.kills,
-    algMs: algo.algMs
+    stats: s,
+    algMs: algo.algMs,
+    backtracks: s.backtracks, parks: s.parks,
+    resumes: s.resumes, kills: s.kills
+  };
+}
+
+// Run each algorithm multiple times on the same maze, average the timing.
+// Structural results (counts, path) are identical between reps.
+function runBench(factory, isLSB){
+  let totalMs = 0, reps = 0;
+  let last = null;
+  while(reps < MASS_MAX_REPS){
+    last = runOneOnce(factory, isLSB);
+    totalMs += last.algMs;
+    reps++;
+    if(totalMs >= MASS_MIN_TIME_MS) break;
+  }
+  return {
+    ...last,
+    avgMs: totalMs / reps,
+    reps: reps,
+    totalMs: totalMs
   };
 }
 
@@ -894,14 +926,12 @@ function massTest(reuse){
   document.getElementById('pauseBtn').innerText = 'Resume';
   const out = document.getElementById('results');
   out.style.display = 'block';
-  out.textContent = 'Running ' + MASS_N + ' mazes…';
+  out.textContent = 'Running ' + MASS_N + ' mazes (timing reps until stable)…';
 
   setTimeout(() => {
-    // Build the list of (type, seed) pairs
     let plans;
-    if(reuse && lastSeeds){
-      plans = lastSeeds.slice();
-    } else {
+    if(reuse && lastSeeds){ plans = lastSeeds.slice(); }
+    else {
       plans = [];
       for(let i=0; i<MASS_N; i++){
         const t = MAZE_TYPES[i % MAZE_TYPES.length];
@@ -919,38 +949,45 @@ function massTest(reuse){
     for(const plan of plans){
       const g = plan.fn(plan.seed);
       const S = [1,1], G = [W-3,H-3];
-      const ra = runOne(new AStar(g, S, G), false);
-      const rl = runOne(new LSB(g, S, G), true);
-      if(ra.success) aSuccess++;
-      if(rl.success) lSuccess++;
+
+      const ra = runBench(() => new AStar(g, S, G), false);
+      const rl = runBench(() => new LSB(g, S, G), true);
+
+      const aOk = ra.stats.success;
+      const lOk = rl.stats.success;
+      if(aOk) aSuccess++;
+      if(lOk) lSuccess++;
 
       let verdict;
-      if(!ra.success && !rl.success) verdict = 'both FAIL';
-      else if(!rl.success) verdict = 'A* (LSB fail)';
-      else if(!ra.success) verdict = 'LSB (A* fail)';
-      else if(rl.expanded < ra.expanded){ verdict = 'LSB'; lWins++; }
-      else if(ra.expanded < rl.expanded){ verdict = 'A*';  aWins++; }
+      if(!aOk && !lOk) verdict = 'both FAIL';
+      else if(!lOk) verdict = 'A* (LSB fail)';
+      else if(!aOk) verdict = 'LSB (A* fail)';
+      else if(ra.stats.expanded < rl.stats.expanded) verdict = 'A*';  aWins++;
+      else if(rl.stats.expanded < ra.stats.expanded) verdict = 'LSB'; lWins++;
       else { verdict = 'tie'; ties++; }
 
-      if(ra.success && rl.success){
-        acc.aTime += ra.algMs; acc.lTime += rl.algMs;
-        acc.aExp += ra.expanded; acc.lExp += rl.expanded;
-        acc.aPath += ra.pathLen ?? 0; acc.lPath += rl.pathLen ?? 0;
+      if(aOk && lOk){
+        acc.aTime += ra.avgMs; acc.lTime += rl.avgMs;
+        acc.aExp += ra.stats.expanded; acc.lExp += rl.stats.expanded;
+        acc.aPath += ra.stats.pathLen ?? 0; acc.lPath += rl.stats.pathLen ?? 0;
         acc.lBT += rl.backtracks ?? 0;
         acc.lParks += rl.parks ?? 0;
         acc.lRes += rl.resumes ?? 0;
         acc.lKills += rl.kills ?? 0;
         acc.n++;
       }
-      rows.push({ type: plan.type, seed: plan.seed,
-                  aTime:ra.algMs, lTime:rl.algMs,
-                  aExp:ra.expanded, lExp:rl.expanded,
-                  aPath:ra.pathLen, lPath:rl.pathLen,
-                  aSuccess:ra.success, lSuccess:rl.success,
-                  aReason:ra.pathReason, lReason:rl.pathReason,
-                  lBT:rl.backtracks, lParks:rl.parks,
-                  lRes:rl.resumes, lKills:rl.kills,
-                  verdict });
+      rows.push({
+        type: plan.type, seed: plan.seed,
+        aTime: ra.avgMs, lTime: rl.avgMs,
+        aReps: ra.reps, lReps: rl.reps,
+        aExp: ra.stats.expanded, lExp: rl.stats.expanded,
+        aPath: ra.stats.pathLen, lPath: rl.stats.pathLen,
+        aSuccess: aOk, lSuccess: lOk,
+        lReason: rl.stats.pathReason,
+        lBT: rl.backtracks, lParks: rl.parks,
+        lRes: rl.resumes, lKills: rl.kills,
+        verdict
+      });
     }
 
     const pad = (s,n)=>{ s=String(s); while(s.length<n) s+=' '; return s.slice(0,n); };
@@ -959,26 +996,26 @@ function massTest(reuse){
     let txt = '';
     txt += 'MASS TEST — ' + MASS_N + ' mazes (' + W + 'x' + H + ')' +
            (reuse ? '  [reused seeds]' : '  [fresh seeds]') + '\n';
-    txt += 'Verdict by expanded-cells. Success requires a validated path.\n';
-    txt += 'Time is pure algorithm time (no rendering).\n\n';
-    txt += pad('type',9) + padL('seed',12) + padL('A*ms',7) + padL('LSBms',7)
+    txt += 'Verdict by expanded-cells. Success requires validated path.\n';
+    txt += 'Timing averaged over multiple reps (until ≥' + MASS_MIN_TIME_MS + 'ms cumulative).\n\n';
+    txt += pad('type',9) + padL('seed',12) + padL('A*t',9) + padL('LSBt',9)
          + padL('A*exp',7) + padL('LSBexp',8)
-         + padL('A*path',7) + padL('LSBpath',8)
-         + padL('A*ok',5) + padL('LSBok',6)
+         + padL('A*pth',7) + padL('LSBpth',8)
+         + padL('ok',4) + padL('rep',5)
          + padL('LSBbt',7) + padL('park',6) + padL('res',5) + padL('kill',6)
          + '  verdict\n';
-    txt += '─'.repeat(9+12+7+7+7+8+7+8+5+6+7+6+5+6+12) + '\n';
+    txt += '─'.repeat(9+12+9+9+7+8+7+8+4+5+7+6+5+6+12) + '\n';
     for(const r of rows){
       txt += pad(r.type, 9)
           + padL(r.seed.toString(16), 12)
-          + padL(r.aTime.toFixed(1), 7)
-          + padL(r.lTime.toFixed(1), 7)
+          + padL(fmtTime(r.aTime), 9)
+          + padL(fmtTime(r.lTime), 9)
           + padL(r.aExp, 7)
           + padL(r.lExp, 8)
           + padL(r.aPath ?? '—', 7)
           + padL(r.lPath ?? '—', 8)
-          + padL(r.aSuccess ? 'Y' : 'N', 5)
-          + padL(r.lSuccess ? 'Y' : 'N', 6)
+          + padL(r.aSuccess && r.lSuccess ? 'Y/Y' : (r.aSuccess?'Y/N':'N/N'), 4)
+          + padL(r.aReps + '/' + r.lReps, 5)
           + padL(r.lBT ?? '—', 7)
           + padL(r.lParks ?? '—', 6)
           + padL(r.lRes ?? '—', 5)
@@ -988,32 +1025,30 @@ function massTest(reuse){
         txt += '  ↳ LSB path invalid: ' + r.lReason + '\n';
       }
     }
-    txt += '─'.repeat(9+12+7+7+7+8+7+8+5+6+7+6+5+6+12) + '\n';
+    txt += '─'.repeat(9+12+9+9+7+8+7+8+4+5+7+6+5+6+12) + '\n';
     if(acc.n > 0){
       txt += pad('AVG', 9) + padL('', 12)
-          + padL((acc.aTime/acc.n).toFixed(1), 7)
-          + padL((acc.lTime/acc.n).toFixed(1), 7)
+          + padL(fmtTime(acc.aTime/acc.n), 9)
+          + padL(fmtTime(acc.lTime/acc.n), 9)
           + padL((acc.aExp/acc.n).toFixed(0), 7)
           + padL((acc.lExp/acc.n).toFixed(0), 8)
           + padL((acc.aPath/acc.n).toFixed(0), 7)
           + padL((acc.lPath/acc.n).toFixed(0), 8)
-          + padL('', 5) + padL('', 6)
+          + padL('', 4) + padL('', 5)
           + padL((acc.lBT/acc.n).toFixed(0), 7)
           + padL((acc.lParks/acc.n).toFixed(0), 6)
           + padL((acc.lRes/acc.n).toFixed(0), 5)
           + padL((acc.lKills/acc.n).toFixed(0), 6)
           + '  (n=' + acc.n + ')\n';
     }
-    txt += '\n';
-    txt += 'SUCCESS  A*: ' + aSuccess + '/' + MASS_N
+    txt += '\nSUCCESS  A*: ' + aSuccess + '/' + MASS_N
          + '   LSB: ' + lSuccess + '/' + MASS_N + '\n';
-    txt += 'WINS (on successfully-solved mazes)  A*: ' + aWins
-         + '   LSB: ' + lWins + '   tie: ' + ties + '\n\n';
+    txt += 'WINS  A*: ' + aWins + '   LSB: ' + lWins + '   tie: ' + ties + '\n\n';
 
-    txt += 'Per-type breakdown (only mazes both solved):\n';
+    txt += 'Per-type breakdown (both solved):\n';
     for(const t of MAZE_TYPES){
       const sub = rows.filter(r => r.type === t.name && r.aSuccess && r.lSuccess);
-      if(sub.length === 0){ txt += '  ' + pad(t.name, 9) + '  (no comparable runs)\n'; continue; }
+      if(sub.length === 0){ txt += '  ' + pad(t.name, 9) + '  (none)\n'; continue; }
       const aAvg = (sub.reduce((s,r)=>s+r.aExp,0) / sub.length).toFixed(0);
       const lAvg = (sub.reduce((s,r)=>s+r.lExp,0) / sub.length).toFixed(0);
       const lBT  = (sub.reduce((s,r)=>s+(r.lBT||0),0) / sub.length).toFixed(0);
@@ -1030,6 +1065,7 @@ function massTest(reuse){
 // ===================================================================
 // start
 // ===================================================================
+setSpeed(1);   // default playback: 1 recorded tick per frame (~60 tps)
 setScenario('maze_any');
 requestAnimationFrame(loop);
 </script>
