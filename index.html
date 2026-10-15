@@ -62,15 +62,18 @@
 // ---------- config ----------
 const W = 60, H = 30;
 const CELL = Math.floor(480 / W);
-const START = [0, 0];
-const GOAL = [W-1, H-1];
-let TICK_DELAY = 30;
+let START = [0, 0];
+let GOAL  = [W-1, H-1];
+let TICK_DELAY = 20;
 let BUDGET_PER_TICK = 6;
 
-// ---------- maze gen ----------
+// ---------- rng ----------
 function rng(seed){ let s=seed>>>0; return ()=>{ s=(s*1664525+1013904223)>>>0; return s/4294967296; }; }
 
-function makeOpen(){ return Array.from({length:H},()=>Array(W).fill(0)); }
+// ---------- maze gen ----------
+function makeOpen(){
+  return Array.from({length:H},()=>Array(W).fill(0));
+}
 
 function makeSparse(){
   const g = Array.from({length:H},()=>Array(W).fill(0));
@@ -89,7 +92,8 @@ function makeRandom(density, seed){
   return g;
 }
 
-// Perfect maze (recursive backtracker) — same topology as mazegenerator.net.
+// Perfect maze — recursive backtracker. All cells are walls except carved
+// corridors on odd coordinates. Start/Goal must be placed on odd coords.
 function makePerfectMaze(seed){
   const r = rng(seed);
   const g = Array.from({length:H},()=>Array(W).fill(1));
@@ -117,13 +121,6 @@ function makePerfectMaze(seed){
     }
     if(!moved) stack.pop();
   }
-  // open corners + punch entrances
-  g[0][0]=0;
-  g[H-1][W-1]=0;
-  if(g[1][0]!==0) g[1][0]=0;
-  if(g[0][1]!==0) g[0][1]=0;
-  if(g[H-2][W-1]!==0) g[H-2][W-1]=0;
-  if(g[H-1][W-2]!==0) g[H-1][W-2]=0;
   return g;
 }
 
@@ -141,7 +138,7 @@ function neighbors(grid,c){
 }
 function key(c){ return c[1]*W+c[0]; }
 
-// Bresenham line cells from a to b, excluding a, including b
+// Bresenham line from a (exclusive) to b (inclusive)
 function lineCells(a,b){
   let [x0,y0]=a, [x1,y1]=b;
   const cells=[];
@@ -158,40 +155,82 @@ function lineCells(a,b){
   return cells;
 }
 
+// ---------- MinHeap ----------
+class MinHeap {
+  constructor(){ this.h=[]; }
+  push(item){ this.h.push(item); this._up(this.h.length-1); }
+  pop(){
+    const top = this.h[0];
+    const last = this.h.pop();
+    if(this.h.length){ this.h[0]=last; this._down(0); }
+    return top;
+  }
+  get size(){ return this.h.length; }
+  _up(i){
+    const h=this.h;
+    while(i>0){
+      const p=(i-1)>>1;
+      if(h[p][0]<=h[i][0]) break;
+      [h[p],h[i]]=[h[i],h[p]];
+      i=p;
+    }
+  }
+  _down(i){
+    const h=this.h, n=h.length;
+    while(true){
+      let l=2*i+1, r=2*i+2, s=i;
+      if(l<n && h[l][0]<h[s][0]) s=l;
+      if(r<n && h[r][0]<h[s][0]) s=r;
+      if(s===i) break;
+      [h[s],h[i]]=[h[i],h[s]];
+      i=s;
+    }
+  }
+}
+
 // ---------- A* ----------
 class AStar {
-  constructor(grid){
+  constructor(grid, start, goal){
     this.grid=grid;
+    this.start=start;
+    this.goal=goal;
     this.name="A*";
-    this.open=[[manhattan(START,GOAL),0,START]];
-    this.g={[key(START)]:0};
-    this.came={};
-    this.closed=new Set();
-    this.visited=new Set([key(START)]);
-    this.frontier=new Set([key(START)]);
+    this.open = new MinHeap();
+    this.open.push([manhattan(start,goal), 0, start]);
+    this.g = new Map();
+    this.g.set(key(start), 0);
+    this.came = new Map();
+    this.closed = new Set();
+    this.visited = new Set([key(start)]);
+    this.frontier = new Set([key(start)]);
     this.done=false;
     this.path=null;
     this.expanded=0;
   }
   step(budget){
-    for(let i=0;i<budget && !this.done;i++){
-      if(!this.open.length){ this.done=true; return; }
-      let bi=0; for(let j=1;j<this.open.length;j++) if(this.open[j][0]<this.open[bi][0]) bi=j;
-      const [f,g,c]=this.open.splice(bi,1)[0];
-      if(this.closed.has(key(c))){ i--; continue; }
-      this.closed.add(key(c));
-      this.visited.add(key(c));
-      this.frontier.delete(key(c));
+    let spent = 0;
+    while(spent < budget && !this.done){
+      if(this.open.size === 0){ this.done=true; return; }
+      const [,g,c] = this.open.pop();
+      const kc = key(c);
+      if(this.closed.has(kc)) continue;   // stale entry, doesn't count
+      this.closed.add(kc);
+      this.visited.add(kc);
+      this.frontier.delete(kc);
       this.expanded++;
-      if(c[0]===GOAL[0]&&c[1]===GOAL[1]){
+      spent++;
+      if(c[0]===this.goal[0] && c[1]===this.goal[1]){
         this.done=true; this._recon(c); return;
       }
       for(const n of neighbors(this.grid,c)){
-        const ng=g+1;
-        const kn=key(n);
-        if(this.g[kn]===undefined||ng<this.g[kn]){
-          this.g[kn]=ng; this.came[kn]=c;
-          this.open.push([ng+manhattan(n,GOAL),ng,n]);
+        const ng = g+1;
+        const kn = key(n);
+        if(this.closed.has(kn)) continue;
+        const cur = this.g.get(kn);
+        if(cur===undefined || ng < cur){
+          this.g.set(kn, ng);
+          this.came.set(kn, c);
+          this.open.push([ng+manhattan(n,this.goal), ng, n]);
           this.frontier.add(kn);
         }
       }
@@ -199,82 +238,109 @@ class AStar {
   }
   _recon(end){
     const p=[]; let c=end;
-    while(c){ p.push(c); c=this.came[key(c)]; }
+    while(c){ p.push(c); c=this.came.get(key(c)); }
     p.reverse(); this.path=p;
   }
 }
 
 // ---------- LSB ----------
 class Branch {
-  constructor(cell,path,last){ this.cell=cell; this.path=path; this.last=last; this.best=0; this.stagnant=0; }
+  constructor(cell, path, last){
+    this.cell=cell; this.path=path; this.last=last;
+    this.best=0; this.stagnant=0;
+  }
 }
+
 class LSB {
-  constructor(grid, opts={}){
-    this.grid=grid; this.name="LSB";
-    this.max_branches = opts.max_branches ?? 20;
-    this.stag_limit = opts.stag_limit ?? 200;
-    this.scar_threshold = opts.scar_threshold ?? 2.5;
-    this.scar_decay = opts.scar_decay ?? 0.004;
-    this.lookahead = opts.lookahead ?? 3;
+  constructor(grid, start, goal, opts={}){
+    this.grid=grid;
+    this.start=start;
+    this.goal=goal;
+    this.name="LSB";
+    this.max_branches    = opts.max_branches    ?? 20;
+    this.stag_limit      = opts.stag_limit      ?? 400;
+    this.scar_threshold  = opts.scar_threshold  ?? 2.5;
+    this.scar_decay      = opts.scar_decay      ?? 0.004;
+    this.lookahead       = opts.lookahead       ?? 2;
     this.scar = new Map();
-    const b = new Branch(START,[START],null);
-    b.best = manhattan(START,GOAL);
+    const b = new Branch(start, [start], null);
+    b.best = manhattan(start, goal);
     this.branches=[b];
-    this.done=false; this.path=null; this.expanded=0; this.tick=0;
-    this.visited=new Set([key(START)]);
-    this.frontier=new Set([key(START)]);
-    this.dead=new Set();
+    this.done=false;
+    this.path=null;
+    this.expanded=0;
+    this.tick=0;
+    this.visited = new Set([key(start)]);
+    this.frontier = new Set([key(start)]);
+    this.dead = new Set();
   }
   _scarAdd(c, amt){ this.scar.set(key(c), (this.scar.get(key(c))||0)+amt); }
   _scarGet(c){ return this.scar.get(key(c))||0; }
+
   step(budget){
     for(let i=0;i<budget && !this.done;i++){
       if(!this.branches.length){ this.done=true; return; }
       this.tick++;
       const next=[];
       for(const b of this.branches){
-        const ray = lineCells(b.cell, GOAL);
-        let blocked=null;
-        for(let k=this.lookahead;k<ray.length;k++){
+        // --- redraw line from current cell to goal ---
+        const ray = lineCells(b.cell, this.goal);
+
+        // find first wall on the ray (skip `lookahead` cells ahead of us so
+        // we don't re-collide with the cell we're standing on)
+        let blocked = null;
+        for(let k=this.lookahead; k<ray.length; k++){
           const [x,y]=ray[k];
           if(x<0||x>=W||y<0||y>=H){ blocked=ray[k]; break; }
           if(this.grid[y][x]===1){ blocked=ray[k]; break; }
         }
+
         let stepCell;
         if(!blocked){
+          // ray is clear — step along it
           stepCell = ray[0] || null;
           if(!stepCell){
+            // standing on goal
             this.done=true; this.path=b.path; return;
           }
         } else {
-          const cands = neighbors(this.grid, blocked).filter(n=>!(n[0]===b.cell[0]&&n[1]===b.cell[1]));
+          // --- shift: pick a neighbor of the blocker ---
+          const cands = neighbors(this.grid, blocked)
+                          .filter(n => !(n[0]===b.cell[0] && n[1]===b.cell[1]));
           if(!cands.length){
+            // dead end: kill branch, scar path
             for(const c of b.path){ this._scarAdd(c,1); this.dead.add(key(c)); }
             continue;
           }
-          cands.sort((p,q)=>euclid(p,GOAL)-euclid(q,GOAL));
-          const bd = euclid(cands[0],GOAL);
-          const tied = cands.filter(c=>euclid(c,GOAL)===bd);
-          if(tied.length>1 && this.branches.length+next.length<this.max_branches){
+          cands.sort((p,q)=>euclid(p,this.goal)-euclid(q,this.goal));
+          const bd = euclid(cands[0], this.goal);
+          const tied = cands.filter(c=>euclid(c,this.goal)===bd);
+
+          // --- tie -> branch ---
+          if(tied.length>1 && this.branches.length+next.length < this.max_branches){
             for(let t=1;t<tied.length;t++){
               const nb = new Branch(tied[t], b.path.concat([tied[t]]), b.cell);
-              nb.best = manhattan(tied[t],GOAL);
+              nb.best = manhattan(tied[t], this.goal);
               next.push(nb);
             }
           }
           stepCell = tied[0];
         }
+
         if(!stepCell) continue;
 
-        if(this._scarGet(stepCell)>this.scar_threshold &&
-           manhattan(stepCell,GOAL)>=b.best){
-          const alt = neighbors(this.grid, stepCell).filter(c=>this._scarGet(c)<=this.scar_threshold);
+        // --- scar avoidance: discouraged, not forbidden ---
+        if(this._scarGet(stepCell) > this.scar_threshold &&
+           manhattan(stepCell, this.goal) >= b.best){
+          const alt = neighbors(this.grid, stepCell)
+                        .filter(c => this._scarGet(c) <= this.scar_threshold);
           if(alt.length){
-            alt.sort((p,q)=>euclid(p,GOAL)-euclid(q,GOAL));
+            alt.sort((p,q)=>euclid(p,this.goal)-euclid(q,this.goal));
             stepCell = alt[0];
           }
         }
 
+        // --- commit ---
         b.path = b.path.concat([stepCell]);
         b.last = b.cell;
         b.cell = stepCell;
@@ -283,21 +349,26 @@ class LSB {
         if(b.last) this.frontier.delete(key(b.last));
         this.frontier.add(key(stepCell));
 
-        const d = manhattan(stepCell,GOAL);
-        if(d<b.best){ b.best=d; b.stagnant=0; } else b.stagnant++;
+        const d = manhattan(stepCell, this.goal);
+        if(d < b.best){ b.best=d; b.stagnant=0; } else b.stagnant++;
 
-        if(stepCell[0]===GOAL[0]&&stepCell[1]===GOAL[1]){
+        if(stepCell[0]===this.goal[0] && stepCell[1]===this.goal[1]){
           this.done=true; this.path=b.path; return;
         }
 
-        if(b.stagnant>this.stag_limit){
+        // --- stagnation kill ---
+        if(b.stagnant > this.stag_limit){
           for(const c of b.path){ this._scarAdd(c,1); this.dead.add(key(c)); }
           continue;
         }
         next.push(b);
       }
+
+      // beam cap
       next.sort((a,b)=>a.best-b.best);
-      this.branches = next.slice(0,this.max_branches);
+      this.branches = next.slice(0, this.max_branches);
+
+      // scar decay
       if(this.scar_decay>0 && this.tick%60===0){
         for(const k of Array.from(this.scar.keys())){
           const v = this.scar.get(k)*(1-this.scar_decay);
@@ -322,7 +393,8 @@ const COLOR = {
 };
 
 function draw(ctx, grid, algo){
-  ctx.fillStyle = COLOR.open; ctx.fillRect(0,0,ctx.canvas.width,ctx.canvas.height);
+  ctx.fillStyle = COLOR.open;
+  ctx.fillRect(0,0,ctx.canvas.width,ctx.canvas.height);
   const pathSet = algo.path ? new Set(algo.path.map(key)) : null;
   for(let y=0;y<H;y++){
     for(let x=0;x<W;x++){
@@ -342,50 +414,57 @@ function draw(ctx, grid, algo){
 
 function stats(algo){
   return `expanded: <b>${algo.expanded}</b><br>` +
+         `unique cells: <b>${algo.visited.size}</b><br>` +
          `path length: <b>${algo.path?algo.path.length:'—'}</b><br>` +
          `frontier: <b>${algo.frontier.size}</b><br>` +
          `done: <b>${algo.done}</b>`;
 }
 
 // ---------- driver ----------
-let grid, a, l, paused=false, tick=0, t0=0, lastFrame=0;
+let grid, a, l, paused=false, t0=0, lastFrame=0, finished=false;
 
 function setScenario(name){
-  if(name==='open') grid = makeOpen();
-  else if(name==='sparse') grid = makeSparse();
-  else if(name==='r020') grid = makeRandom(0.20, 1);
-  else if(name==='r030') grid = makeRandom(0.30, 2);
-  else if(name==='r038') grid = makeRandom(0.38, 3);
-  else if(name==='maze1') grid = makePerfectMaze(1);
-  else if(name==='maze2') grid = makePerfectMaze(7);
-  else if(name==='maze3') grid = makePerfectMaze(42);
+  if(name==='open'){    START=[0,0];     GOAL=[W-1,H-1]; grid = makeOpen(); }
+  else if(name==='sparse'){ START=[0,0]; GOAL=[W-1,H-1]; grid = makeSparse(); }
+  else if(name==='r020'){   START=[0,0]; GOAL=[W-1,H-1]; grid = makeRandom(0.20, 1); }
+  else if(name==='r030'){   START=[0,0]; GOAL=[W-1,H-1]; grid = makeRandom(0.30, 2); }
+  else if(name==='r038'){   START=[0,0]; GOAL=[W-1,H-1]; grid = makeRandom(0.38, 3); }
+  else if(name==='maze1'){  grid = makePerfectMaze(1);  START=[1,1]; GOAL=[W-3,H-3]; }
+  else if(name==='maze2'){  grid = makePerfectMaze(7);  START=[1,1]; GOAL=[W-3,H-3]; }
+  else if(name==='maze3'){  grid = makePerfectMaze(42); START=[1,1]; GOAL=[W-3,H-3]; }
   restart();
 }
 
 function restart(){
-  a = new AStar(grid);
-  l = new LSB(grid);
-  tick=0; t0=performance.now();
+  a = new AStar(grid, START, GOAL);
+  l = new LSB(grid, START, GOAL);
   paused=false;
+  finished=false;
+  t0=performance.now();
   document.getElementById('pauseBtn').innerText = 'Pause';
-  draw(ctxA, grid, a); draw(ctxL, grid, l);
+  draw(ctxA, grid, a);
+  draw(ctxL, grid, l);
   document.getElementById('sA').innerHTML = stats(a);
   document.getElementById('sL').innerHTML = stats(l);
 }
 
-function togglePause(){ paused=!paused; document.getElementById('pauseBtn').innerText = paused?'Resume':'Pause'; }
+function togglePause(){
+  if(finished) return;
+  paused = !paused;
+  document.getElementById('pauseBtn').innerText = paused ? 'Resume' : 'Pause';
+}
 
 function loop(now){
   requestAnimationFrame(loop);
-  if(paused) return;
-  if(now-lastFrame < TICK_DELAY) return;
+  if(paused || finished) return;
+  if(now - lastFrame < TICK_DELAY) return;
   lastFrame = now;
 
   if(!a.done) a.step(BUDGET_PER_TICK);
   if(!l.done) l.step(BUDGET_PER_TICK);
-  tick++;
 
-  draw(ctxA, grid, a); draw(ctxL, grid, l);
+  draw(ctxA, grid, a);
+  draw(ctxL, grid, l);
   document.getElementById('sA').innerHTML = stats(a);
   document.getElementById('sL').innerHTML = stats(l);
 
@@ -393,8 +472,8 @@ function loop(now){
     const el = ((performance.now()-t0)/1000).toFixed(2);
     document.getElementById('sA').innerHTML += `<br>time: <b>${el}s</b>`;
     document.getElementById('sL').innerHTML += `<br>time: <b>${el}s</b>`;
-    paused = true;
-    document.getElementById('pauseBtn').innerText = 'Resume';
+    finished = true;
+    document.getElementById('pauseBtn').innerText = 'Done';
   }
 }
 
