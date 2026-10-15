@@ -3,11 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LSB vs A*</title>
+<title>LSB vs A* — 200×100</title>
 <style>
   body { background:#111; color:#eee; font-family: monospace; margin:0; padding:12px; }
   h2 { margin: 4px 0; font-size: 15px; }
-  canvas { display:block; image-rendering: pixelated; background:#000; margin-bottom:8px; }
+  canvas { display:block; image-rendering: pixelated; background:#000; margin-bottom:8px; max-width:100%; }
   .row { display:flex; gap:12px; flex-wrap:wrap; }
   .col { flex:1; min-width:320px; }
   .panel { background:#181818; padding:8px; border-radius:6px; }
@@ -57,18 +57,19 @@
   <button class="speed-btn" data-sp="2"    onclick="setSpeed(2)">2×</button>
   <button class="speed-btn" data-sp="4"    onclick="setSpeed(4)">4×</button>
   <button class="speed-btn" data-sp="16"   onclick="setSpeed(16)">16×</button>
+  <button class="speed-btn" data-sp="64"   onclick="setSpeed(64)">64×</button>
   <button class="speed-btn" data-sp="9999" onclick="setSpeed(9999)">⚡ instant</button>
 </div>
 
 <div class="row">
   <div class="col panel">
     <h2>A*</h2>
-    <canvas id="cA" width="480" height="240"></canvas>
+    <canvas id="cA"></canvas>
     <div class="stats" id="sA"></div>
   </div>
   <div class="col panel">
     <h2>LSB</h2>
-    <canvas id="cL" width="480" height="240"></canvas>
+    <canvas id="cL"></canvas>
     <div class="stats" id="sL"></div>
   </div>
 </div>
@@ -90,14 +91,14 @@
 // ===================================================================
 // config
 // ===================================================================
-const W = 60, H = 30;
-const CELL = Math.floor(480 / W);
-const TICK_DELAY = 16;              // ms per frame
-const BUDGET_PER_TICK = 8;          // algo steps per recorded tick
-const RECORD_MAX_TICKS = 5000;
+const W = 200, H = 100;
+const CELL = 3;                              // canvas = 600×300
+const TICK_DELAY = 16;
+const BUDGET_PER_TICK = 8;
+const RECORD_MAX_TICKS = 20000;              // was 5000; 200×100 needs more
+const MASS_MAX_ITERS   = 60000;              // was 20000; same reason
 
-let PLAYBACK_SPEED = 1;             // recorded ticks per frame (can be <1)
-
+let PLAYBACK_SPEED = 1;
 let START = [0, 0];
 let GOAL  = [W-1, H-1];
 
@@ -119,9 +120,13 @@ function freshSeed(){
 function makeOpen(){ return Array.from({length:H},()=>Array(W).fill(0)); }
 function makeSparse(){
   const g = Array.from({length:H},()=>Array(W).fill(0));
+  // scale the block layout to the grid
+  const sx = W/60, sy = H/30;
   const blocks = [[10,5,16,24],[26,12,32,28],[36,4,44,14],[48,18,58,26]];
   for(const [x0,y0,x1,y1] of blocks)
-    for(let y=y0;y<y1;y++) for(let x=x0;x<x1;x++) g[y][x]=1;
+    for(let y=Math.floor(y0*sy); y<Math.floor(y1*sy); y++)
+      for(let x=Math.floor(x0*sx); x<Math.floor(x1*sx); x++)
+        g[y][x]=1;
   g[0][0]=0; g[H-1][W-1]=0;
   return g;
 }
@@ -245,7 +250,6 @@ function validatePath(grid, path, start, goal){
   return {ok:true};
 }
 
-// ---- time formatting ----
 function fmtTime(ms){
   if(ms < 0.001) return (ms*1e6).toFixed(0)+'ns';
   if(ms < 1)     return (ms*1000).toFixed(0)+'μs';
@@ -370,14 +374,15 @@ class Branch {
 class LSB {
   constructor(grid, start, goal, opts={}){
     this.grid=grid; this.start=start; this.goal=goal;
-    this.max_branches        = opts.max_branches        ?? 16;
-    this.max_parked          = opts.max_parked          ?? 32;
+    // scaled up for the larger maze
+    this.max_branches        = opts.max_branches        ?? 32;
+    this.max_parked          = opts.max_parked          ?? 128;
     this.scar_threshold      = opts.scar_threshold      ?? 2.5;
     this.scar_decay          = opts.scar_decay          ?? 0.004;
     this.tryEps              = opts.tryEps              ?? 0.5;
-    this.maxParksPerBranch   = opts.maxParksPerBranch   ?? 3;
-    this.minActive           = opts.minActive           ?? 4;
-    this.stallThreshold      = opts.stallThreshold      ?? 200;
+    this.maxParksPerBranch   = opts.maxParksPerBranch   ?? 5;
+    this.minActive           = opts.minActive           ?? 8;
+    this.stallThreshold      = opts.stallThreshold      ?? 500;
 
     this.scar = new Map();
     const b = new Branch(start, [start], null);
@@ -443,7 +448,7 @@ class LSB {
       if(novelAfter > novelBefore){
         this.lastNovelTick = this.tick;
       } else if(this.tick - this.lastNovelTick > this.stallThreshold && this.parked.length > 0){
-        this._unpark(2);
+        this._unpark(4);
         this.lastNovelTick = this.tick;
       }
 
@@ -854,7 +859,6 @@ function loop(now){
 
   const lastIdx = recording.ticks - 1;
 
-  // instant mode: jump to end immediately
   if(PLAYBACK_SPEED >= 9999){
     advanceToFrame(lastIdx);
     renderCurrent();
@@ -884,8 +888,7 @@ function loop(now){
 // mass test  (with timing reps)
 // ===================================================================
 const MASS_N = 12;
-const MASS_MAX_ITERS = 20000;
-const MASS_MIN_TIME_MS = 5;   // run until cumulative time exceeds this
+const MASS_MIN_TIME_MS = 5;
 const MASS_MAX_REPS = 30;
 let lastSeeds = null;
 
@@ -902,8 +905,6 @@ function runOneOnce(factory, isLSB){
   };
 }
 
-// Run each algorithm multiple times on the same maze, average the timing.
-// Structural results (counts, path) are identical between reps.
 function runBench(factory, isLSB){
   let totalMs = 0, reps = 0;
   let last = null;
@@ -926,7 +927,7 @@ function massTest(reuse){
   document.getElementById('pauseBtn').innerText = 'Resume';
   const out = document.getElementById('results');
   out.style.display = 'block';
-  out.textContent = 'Running ' + MASS_N + ' mazes (timing reps until stable)…';
+  out.textContent = 'Running ' + MASS_N + ' mazes (200×100, timing reps until stable)…';
 
   setTimeout(() => {
     let plans;
@@ -994,29 +995,29 @@ function massTest(reuse){
     const padL= (s,n)=>{ s=String(s); while(s.length<n) s=' '+s; return s.slice(-n); };
 
     let txt = '';
-    txt += 'MASS TEST — ' + MASS_N + ' mazes (' + W + 'x' + H + ')' +
+    txt += 'MASS TEST — ' + MASS_N + ' mazes (' + W + '×' + H + ')' +
            (reuse ? '  [reused seeds]' : '  [fresh seeds]') + '\n';
     txt += 'Verdict by expanded-cells. Success requires validated path.\n';
     txt += 'Timing averaged over multiple reps (until ≥' + MASS_MIN_TIME_MS + 'ms cumulative).\n\n';
-    txt += pad('type',9) + padL('seed',12) + padL('A*t',9) + padL('LSBt',9)
+    txt += pad('type',9) + padL('seed',12) + padL('A*t',10) + padL('LSBt',10)
          + padL('A*exp',7) + padL('LSBexp',8)
          + padL('A*pth',7) + padL('LSBpth',8)
-         + padL('ok',4) + padL('rep',5)
-         + padL('LSBbt',7) + padL('park',6) + padL('res',5) + padL('kill',6)
+         + padL('ok',4) + padL('rep',7)
+         + padL('LSBbt',8) + padL('park',6) + padL('res',5) + padL('kill',6)
          + '  verdict\n';
-    txt += '─'.repeat(9+12+9+9+7+8+7+8+4+5+7+6+5+6+12) + '\n';
+    txt += '─'.repeat(9+12+10+10+7+8+7+8+4+7+8+6+5+6+12) + '\n';
     for(const r of rows){
       txt += pad(r.type, 9)
           + padL(r.seed.toString(16), 12)
-          + padL(fmtTime(r.aTime), 9)
-          + padL(fmtTime(r.lTime), 9)
+          + padL(fmtTime(r.aTime), 10)
+          + padL(fmtTime(r.lTime), 10)
           + padL(r.aExp, 7)
           + padL(r.lExp, 8)
           + padL(r.aPath ?? '—', 7)
           + padL(r.lPath ?? '—', 8)
           + padL(r.aSuccess && r.lSuccess ? 'Y/Y' : (r.aSuccess?'Y/N':'N/N'), 4)
-          + padL(r.aReps + '/' + r.lReps, 5)
-          + padL(r.lBT ?? '—', 7)
+          + padL(r.aReps + '/' + r.lReps, 7)
+          + padL(r.lBT ?? '—', 8)
           + padL(r.lParks ?? '—', 6)
           + padL(r.lRes ?? '—', 5)
           + padL(r.lKills ?? '—', 6)
@@ -1025,17 +1026,17 @@ function massTest(reuse){
         txt += '  ↳ LSB path invalid: ' + r.lReason + '\n';
       }
     }
-    txt += '─'.repeat(9+12+9+9+7+8+7+8+4+5+7+6+5+6+12) + '\n';
+    txt += '─'.repeat(9+12+10+10+7+8+7+8+4+7+8+6+5+6+12) + '\n';
     if(acc.n > 0){
       txt += pad('AVG', 9) + padL('', 12)
-          + padL(fmtTime(acc.aTime/acc.n), 9)
-          + padL(fmtTime(acc.lTime/acc.n), 9)
+          + padL(fmtTime(acc.aTime/acc.n), 10)
+          + padL(fmtTime(acc.lTime/acc.n), 10)
           + padL((acc.aExp/acc.n).toFixed(0), 7)
           + padL((acc.lExp/acc.n).toFixed(0), 8)
           + padL((acc.aPath/acc.n).toFixed(0), 7)
           + padL((acc.lPath/acc.n).toFixed(0), 8)
-          + padL('', 4) + padL('', 5)
-          + padL((acc.lBT/acc.n).toFixed(0), 7)
+          + padL('', 4) + padL('', 7)
+          + padL((acc.lBT/acc.n).toFixed(0), 8)
           + padL((acc.lParks/acc.n).toFixed(0), 6)
           + padL((acc.lRes/acc.n).toFixed(0), 5)
           + padL((acc.lKills/acc.n).toFixed(0), 6)
@@ -1052,9 +1053,9 @@ function massTest(reuse){
       const aAvg = (sub.reduce((s,r)=>s+r.aExp,0) / sub.length).toFixed(0);
       const lAvg = (sub.reduce((s,r)=>s+r.lExp,0) / sub.length).toFixed(0);
       const lBT  = (sub.reduce((s,r)=>s+(r.lBT||0),0) / sub.length).toFixed(0);
-      txt += '  ' + pad(t.name, 9) + '  A* exp ' + padL(aAvg, 6)
-           + '   LSB exp ' + padL(lAvg, 6)
-           + '   LSB avg bt ' + padL(lBT, 6)
+      txt += '  ' + pad(t.name, 9) + '  A* exp ' + padL(aAvg, 7)
+           + '   LSB exp ' + padL(lAvg, 7)
+           + '   LSB avg bt ' + padL(lBT, 7)
            + '   n=' + sub.length + '\n';
     }
 
@@ -1065,7 +1066,7 @@ function massTest(reuse){
 // ===================================================================
 // start
 // ===================================================================
-setSpeed(1);   // default playback: 1 recorded tick per frame (~60 tps)
+setSpeed(1);
 setScenario('maze_any');
 requestAnimationFrame(loop);
 </script>
