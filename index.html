@@ -13,6 +13,7 @@
   .panel { background:#181818; padding:8px; border-radius:6px; }
   .stats { font-size:12px; line-height:1.5; color:#bbb; }
   .stats b { color:#fff; }
+  .meta { font-size:11px; color:#888; margin-top:6px; border-top:1px solid #333; padding-top:6px; }
   button { background:#2a2a2a; color:#eee; border:1px solid #444; padding:8px 12px;
            border-radius:5px; font-family:monospace; font-size:13px; margin:3px; }
   button:active { background:#444; }
@@ -74,11 +75,13 @@
     <h2>A*</h2>
     <canvas id="cA"></canvas>
     <div class="stats" id="sA"></div>
+    <div class="meta" id="metaA"></div>
   </div>
   <div class="col panel">
     <h2>LSB</h2>
     <canvas id="cL"></canvas>
     <div class="stats" id="sL"></div>
+    <div class="meta" id="metaL"></div>
   </div>
 </div>
 
@@ -764,16 +767,13 @@ function recordFrames(algo, isLSB){
 
   var tick = 0;
   var recorded = 1;
-  var stride = RECORD_STRIDE;
 
   while(!algo.done && recorded < MAX_FRAMES){
     algo.step(BUDGET_PER_TICK);
     tick++;
 
-    if(tick % stride !== 0){
-      // middle of stride: skip, but if algo just finished we still want a final frame
-      if(!algo.done) continue;
-    }
+    // Only record on stride boundary, or on final tick
+    if(tick % RECORD_STRIDE !== 0 && !algo.done) continue;
 
     var addVisited = [];
     for(k in algo.visited) if(algo.visited[k] && !prevVisited[k]){ addVisited.push(parseInt(k,10)); prevVisited[k] = true; }
@@ -911,14 +911,33 @@ function fmtStats(stats){
   s += 'done: <b>' + stats.done + '</b>';
   if(stats.exhausted) s += ' <span style="color:#f88">(exhausted)</span>';
   if(stats.done) s += '  success: <b>' + (stats.success ? 'yes' : 'NO') + '</b>';
-  s += '<br>alg time: <b>' + fmtTime(stats.algMs) + '</b>';
+  s += '<br>alg time (recorded): <b>' + fmtTime(stats.algMs) + '</b>';
   return s;
 }
+
 function renderCurrent(){
   draw(ctxA, recording.grid, playbackA, currentA.path, currentA.parked);
   draw(ctxL, recording.grid, playbackL, currentL.path, currentL.parked);
-  document.getElementById('sA').innerHTML = fmtStats(currentA.stats);
-  document.getElementById('sL').innerHTML = fmtStats(currentL.stats);
+
+  // If playback finished, always show the FINAL recorded stats so the
+  // alg time is the frozen end-of-run value regardless of playback speed.
+  var showA = finished
+    ? recording.framesA[recording.framesA.length - 1].stats
+    : currentA.stats;
+  var showL = finished
+    ? recording.framesL[recording.framesL.length - 1].stats
+    : currentL.stats;
+
+  document.getElementById('sA').innerHTML = fmtStats(showA);
+  document.getElementById('sL').innerHTML = fmtStats(showL);
+
+  // Wall-clock metadata, fixed for this recording.
+  if(recording && recording.computeMs !== undefined){
+    var meta = 'wall clock (record + validate, whole run): <b>' +
+               fmtTime(recording.computeMs) + '</b>';
+    document.getElementById('metaA').innerHTML = meta;
+    document.getElementById('metaL').innerHTML = meta;
+  }
 }
 
 function setSpeed(s){
@@ -968,13 +987,16 @@ function buildAndPlay(){
   banner.textContent = 'Calculating...';
   document.getElementById('sA').innerHTML = '';
   document.getElementById('sL').innerHTML = '';
+  document.getElementById('metaA').innerHTML = '';
+  document.getElementById('metaL').innerHTML = '';
   setTimeout(function(){
     var t0 = performance.now();
     recording = buildRecording();
     var computeMs = performance.now() - t0;
-    banner.textContent = 'Computed in ' + fmtTime(computeMs) +
-                         ' - playing back ' + recording.ticks + ' frames';
-    setTimeout(function(){ banner.style.display = 'none'; }, 1500);
+    recording.computeMs = computeMs;
+    banner.textContent = 'Recorded in ' + fmtTime(computeMs) +
+                         ' - ' + recording.ticks + ' frames';
+    setTimeout(function(){ banner.style.display = 'none'; }, 2000);
     resetPlayback();
     paused = false; finished = false; lastFrameTime = 0;
     document.getElementById('pauseBtn').innerText = 'Pause';
@@ -996,8 +1018,8 @@ function loop(now){
   var lastIdx = recording.ticks - 1;
   if(PLAYBACK_SPEED >= 9999){
     advanceToFrame(lastIdx);
-    renderCurrent();
     finished = true;
+    renderCurrent();
     document.getElementById('pauseBtn').innerText = 'Done';
     return;
   }
@@ -1008,8 +1030,8 @@ function loop(now){
   var target = playbackIdx + advanceBy;
   if(target >= lastIdx){
     advanceToFrame(lastIdx);
-    renderCurrent();
     finished = true;
+    renderCurrent();
     document.getElementById('pauseBtn').innerText = 'Done';
     return;
   }
