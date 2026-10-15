@@ -96,6 +96,9 @@ var MASS_BUDGET = 8;
 var TICK_DELAY = 16;
 var PLAYBACK_SPEED = 1;
 
+var CUT_CHECK_INTERVAL = 500;    // ticks between cut detection runs
+var CUT_MIN_VISITED_DELTA = 100; // require this many new visits to re-check
+
 var START = [0, 0];
 var GOAL = [W-1, H-1];
 var grid = null;
@@ -370,12 +373,6 @@ AStar.prototype._recon = function(end){
 };
 
 // =============== LSB ===============
-// Only fix 3 applied:
-//   - no maxParksPerBranch (branches park indefinitely)
-//   - max_parked raised
-//   - actives refilled from parked whenever below minActive
-// Everything else (scoring, overflow kill scarring) is unchanged from the
-// dead-end-filter version.
 function Branch(cell, path, cameFrom){
   this.cell = cell;
   this.k = cell[1] * W + cell[0];
@@ -409,13 +406,12 @@ function LSB(g, start, goal){
   this.grid = g; this.start = start; this.goal = goal;
   var scale = Math.max(1, Math.floor((W*H) / 3000));
   this.max_branches      = 16 * scale;
-  this.max_parked        = 200 * scale;   // FIX 3: raised from 32 * scale
+  this.max_parked        = 200 * scale;
   this.scar_threshold    = 2.5;
   this.scar_decay        = 0.004;
   this.tryEps            = 0.5;
   this.minActive         = 4 * scale;
   this.stallThreshold    = 200 * scale;
-  // FIX 3: maxParksPerBranch removed entirely
 
   var N = W * H;
   var dtg = new Float32Array(N);
@@ -431,6 +427,7 @@ function LSB(g, start, goal){
   this.generated = new Uint8Array(N);
   this.expanded  = new Uint8Array(N);
   this.dead      = new Uint8Array(N);
+  this.cutDead   = new Uint8Array(N);
   this.frontier  = new Uint8Array(N);
   this.scar      = new Float32Array(N);
   this.scarKeys  = {};
@@ -449,6 +446,13 @@ function LSB(g, start, goal){
   this.tick = 0; this.lastNovelTick = 0;
   this.backtracks = 0; this.parks = 0; this.resumes = 0; this.kills = 0;
   this.earlyDeaths = 0;
+
+  // cut state
+  this.cutCheckTick = 0;
+  this.lastCutCheckVisited = 0;
+  this.cutsMade = 0;
+  this.cutCellsPruned = 0;
+
   this.algMs = 0;
 }
 
@@ -481,10 +485,135 @@ LSB.prototype._shouldPark = function(b){
   return b.scoreCache > median * 1.5;
 };
 
+// =============== CUT DETECTION ===============
+// Detect when visited cells form a separator across the maze (top-bottom
+// or left-right). Once a separator exists, unvisited cells that can't reach
+// the goal without crossing visited cells are topologically useless — kill
+// them permanently.
+LSB.prototype._checkForCuts = function(){
+  var N = W * H;
+  // Skip if not enough new ground since last check
+  if(this._visitedCount - this.lastCutCheckVisited < CUT_MIN_VISITED_DELTA) return;
+  this.lastCutCheckVisited = this._visitedCount;
+
+  var parent = new Int32Array(N);
+  for(var i=0; i<N; i++) parent[i] = i;
+  function find(x){
+    var r = x;
+    while(parent[r] !== r) r = parent[r];
+    while(parent[x] !== r){ var nx = parent[x]; parent[x] = r; x = nx; }
+    return r;
+  }
+  function union(a, b){
+    var ra = find(a), rb = find(b);
+    if(ra !== rb) parent[ra] = rb;
+  }
+
+  // Union adjacent visited cells
+  for(var y=0; y<H; y++){
+    var base = y * W;
+    for(var x=0; x<W; x++){
+      var k = base + x;
+      if(!this.visited[k]) continue;
+      if(x + 1 < W && this.visited[k + 1]) union(k, k + 1);
+      if(y + 1 < H && this.visited[k + W]) union(k, k + W);
+    }
+  }
+
+  // Component bounding boxes
+  var bbox = {};
+  for(var yy=0; yy<H; yy++){
+    var b2 = yy * W;
+    for(var xx=0; xx<W; xx++){
+      var kk = b2 + xx;
+      if(!this.visited[kk]) continue;
+      var r = find(kk);
+      var bb = bbox[r];
+      if(!bb){ bb = { minX: xx, maxX: xx, minY: yy, maxY: yy }; bbox[r] = bb; }
+      else {
+        if(xx < bb.minX) bb.minX = xx;
+        if(xx > bb.maxX) bb.maxX = xx;
+        if(yy < bb.minY) bb.minY = yy;
+        if(yy > bb.maxY) bb.maxY = yy;
+      }
+    }
+  }
+
+  // Which components span the full maze?
+  var cutRoots = {};
+  var anyCut = false;
+  for(var r in bbox){
+    var b3 = bbox[r];
+    if(b3.minY === 0 && b3.maxY === H - 1){ cutRoots[r] = 'V'; anyCut = true; }
+    else if(b3.minX === 0 && b3.maxX === W - 1){ cutRoots[r] = 'H'; anyCut = true; }
+  }
+  if(!anyCut) return;
+
+  // Mark all visited cells that belong to a cut component
+  var inCut = new Uint8Array(N);
+  for(var y3=0; y3<H; y3++){
+    var b4 = y3 * W;
+    for(var x3=0; x3<W; x3++){
+      var k3 = b4 + x3;
+      if(!this.visited[k3]) continue;
+      var r3 = find(k3);
+      if(cutRoots[r3]) inCut[k3] = 1;
+    }
+  }
+
+  // BFS from goal through open cells NOT in cut. Anything open, unvisited,
+  // and unreached by this BFS cannot reach the goal without crossing a cut
+  // component — meaning it is on the wrong side.
+  var goalK = this.goalK;
+  var reached = new Uint8Array(N);
+  var queue = [goalK];
+  reached[goalK] = 1;
+  var head = 0;
+  while(head < queue.length){
+    var kc = queue[head++];
+    var cx = kc % W, cy = (kc - cx) / W;
+    for(var di=0; di<4; di++){
+      var nx2 = cx + N4[di][0], ny2 = cy + N4[di][1];
+      if(nx2 < 0 || nx2 >= W || ny2 < 0 || ny2 >= H) continue;
+      if(this.grid[ny2][nx2] !== 0) continue;
+      var nk = ny2 * W + nx2;
+      if(reached[nk]) continue;
+      if(inCut[nk]) continue;   // can't route through cut cells
+      reached[nk] = 1;
+      queue.push(nk);
+    }
+  }
+
+  // Mark wrong-side cells dead
+  var pruned = 0;
+  for(var y4=0; y4<H; y4++){
+    var b5 = y4 * W;
+    for(var x4=0; x4<W; x4++){
+      var k4 = b5 + x4;
+      if(this.grid[y4][x4] !== 0) continue;
+      if(reached[k4]) continue;
+      if(inCut[k4]) continue;
+      if(this.visited[k4]) continue;
+      if(this.dead[k4]) continue;
+      this.dead[k4] = 1;
+      this.cutDead[k4] = 1;
+      this.scar[k4] += 0.5;
+      this.scarKeys[k4] = 1;
+      pruned++;
+    }
+  }
+
+  if(pruned > 0){
+    this.cutsMade++;
+    this.cutCellsPruned += pruned;
+    // Clear the frontier of any branch now sitting on a wrong-side cell
+    // (they'll die on their next step anyway, but this tidies state)
+  }
+};
+
 LSB.prototype.step = function(budget){
   var t0 = performance.now();
   for(var i=0; i<budget && !this.done; i++){
-    // FIX 3: refill actives whenever below minActive, not only when empty
     if(this.branches.length < this.minActive && this.parked.length > 0){
       this._unpark(this.minActive - this.branches.length);
     }
@@ -513,7 +642,6 @@ LSB.prototype.step = function(budget){
     }
     this.branches = next;
 
-    // Overflow handling: unchanged (scar on kill, as before)
     for(var oi=0; oi<overflow.length; oi++){
       var ob = overflow[oi];
       if(this.parked.length < this.max_parked){
@@ -548,6 +676,12 @@ LSB.prototype.step = function(budget){
         if(v < 0.05){ this.scar[kv] = 0; delete this.scarKeys[sk]; }
         else this.scar[kv] = v;
       }
+    }
+
+    // Cut check runs occasionally. It's O(N), so keep the interval high.
+    if(this.tick - this.cutCheckTick >= CUT_CHECK_INTERVAL){
+      this.cutCheckTick = this.tick;
+      this._checkForCuts();
     }
   }
   this.algMs += performance.now() - t0;
@@ -650,7 +784,6 @@ LSB.prototype.stepBranch = function(b, next){
 
   if(b.k === this.goalK){ this.done = true; this.path = b.path; return; }
 
-  // FIX 3: no parkCount / maxParksPerBranch check anymore
   if(this._shouldPark(b)){
     if(this.parked.length < this.max_parked){
       b.parked = true; this.parked.push(b); this.parks++;
@@ -667,9 +800,7 @@ LSB.prototype.backtrack = function(b, next){
     if(top.nextIdx < top.options.length){
       var nt = top.options[top.nextIdx];
       top.nextIdx++;
-
       if(this.dead[nt[2]] && nt[2] !== this.goalK) continue;
-
       for(var i = b.path.length - 1; i > top.pathIdx; i--){
         var c = b.path[i];
         b.pathSet[c[1]*W + c[0]] = 0;
@@ -718,6 +849,8 @@ function getStats(algo, isLSB){
     resumes: isLSB ? algo.resumes : null,
     kills: isLSB ? algo.kills : null,
     earlyDeaths: isLSB ? algo.earlyDeaths : null,
+    cutsMade: isLSB ? algo.cutsMade : null,
+    cutCellsPruned: isLSB ? algo.cutCellsPruned : null,
     parkedCount: isLSB ? algo.parked.length : null,
     algMs: algo.algMs,
     isLSB: isLSB
@@ -873,6 +1006,7 @@ function fmtStats(stats){
     s += 'bt: <b>' + stats.backtracks + '</b>  parks: <b>' + stats.parks + '</b>  res: <b>' + stats.resumes + '</b><br>';
     s += 'kills: <b>' + stats.kills + '</b>  parked: <b>' + stats.parkedCount + '</b><br>';
     s += 'early dead: <b>' + stats.earlyDeaths + '</b><br>';
+    s += 'cuts: <b>' + stats.cutsMade + '</b>  pruned: <b>' + stats.cutCellsPruned + '</b><br>';
   }
   s += 'done: <b>' + stats.done + '</b>';
   if(stats.exhausted) s += ' <span style="color:#f88">(exhausted)</span>';
@@ -1004,7 +1138,7 @@ function runOneOnce(factory, isLSB){
   var iters = 0;
   while(!algo.done && iters < 60000){ algo.step(MASS_BUDGET); iters++; }
   var s = getStats(algo, isLSB);
-  return { stats: s, algMs: algo.algMs, backtracks: s.backtracks, parks: s.parks, resumes: s.resumes, kills: s.kills, earlyDeaths: s.earlyDeaths };
+  return { stats: s, algMs: algo.algMs, backtracks: s.backtracks, parks: s.parks, resumes: s.resumes, kills: s.kills, earlyDeaths: s.earlyDeaths, cutsMade: s.cutsMade, cutCellsPruned: s.cutCellsPruned };
 }
 function runBench(factory, isLSB){
   var totalMs = 0, reps = 0, last = null;
@@ -1016,6 +1150,7 @@ function runBench(factory, isLSB){
   return {
     stats: last.stats, backtracks: last.backtracks, parks: last.parks,
     resumes: last.resumes, kills: last.kills, earlyDeaths: last.earlyDeaths,
+    cutsMade: last.cutsMade, cutCellsPruned: last.cutCellsPruned,
     avgMs: totalMs / reps, reps: reps
   };
 }
@@ -1039,7 +1174,7 @@ function massTest(reuse){
     }
     var rows = [];
     var aSuccess = 0, lSuccess = 0, aWins = 0, lWins = 0, ties = 0;
-    var acc = { aTime:0, lTime:0, aExp:0, lExp:0, aPath:0, lPath:0, lBT:0, lParks:0, lRes:0, lKills:0, lED:0, n:0 };
+    var acc = { aTime:0, lTime:0, aExp:0, lExp:0, aPath:0, lPath:0, lBT:0, lParks:0, lRes:0, lKills:0, lED:0, lCuts:0, lPruned:0, n:0 };
     for(var pi=0; pi<plans.length; pi++){
       var plan = plans[pi];
       var g = plan.fn(plan.seed);
@@ -1063,6 +1198,8 @@ function massTest(reuse){
         acc.lBT += rl.backtracks || 0; acc.lParks += rl.parks || 0;
         acc.lRes += rl.resumes || 0; acc.lKills += rl.kills || 0;
         acc.lED += rl.earlyDeaths || 0;
+        acc.lCuts += rl.cutsMade || 0;
+        acc.lPruned += rl.cutCellsPruned || 0;
         acc.n++;
       }
       rows.push({
@@ -1073,7 +1210,7 @@ function massTest(reuse){
         aPath: ra.stats.pathLen, lPath: rl.stats.pathLen,
         aSuccess: aOk, lSuccess: lOk, lReason: rl.stats.pathReason,
         lBT: rl.backtracks, lParks: rl.parks, lRes: rl.resumes, lKills: rl.kills,
-        lED: rl.earlyDeaths,
+        lED: rl.earlyDeaths, lCuts: rl.cutsMade, lPruned: rl.cutCellsPruned,
         verdict: verdict
       });
     }
@@ -1084,8 +1221,8 @@ function massTest(reuse){
     txt += 'Verdict by expanded-cells. Success requires validated path.\n\n';
     txt += pad('type', 9) + padL('seed', 12) + padL('A*t', 10) + padL('LSBt', 10)
          + padL('A*exp', 8) + padL('LSBexp', 9) + padL('A*pth', 7) + padL('LSBpth', 8)
-         + padL('ok', 4) + padL('rep', 7) + padL('LSBbt', 8) + padL('park', 6) + padL('res', 5) + padL('kill', 6) + padL('eDead', 7) + '  verdict\n';
-    txt += '-----------------------------------------------------------------------------------------------\n';
+         + padL('ok', 4) + padL('rep', 7) + padL('LSBbt', 8) + padL('park', 6) + padL('res', 5) + padL('kill', 6) + padL('eDead', 7) + padL('cuts', 6) + padL('prune', 7) + '  verdict\n';
+    txt += '---------------------------------------------------------------------------------------------------------------\n';
     for(var ri=0; ri<rows.length; ri++){
       var r = rows[ri];
       txt += pad(r.type, 9) + padL(r.seed.toString(16), 12)
@@ -1097,10 +1234,12 @@ function massTest(reuse){
           + padL(r.lBT === null ? '-' : r.lBT, 8) + padL(r.lParks === null ? '-' : r.lParks, 6)
           + padL(r.lRes === null ? '-' : r.lRes, 5) + padL(r.lKills === null ? '-' : r.lKills, 6)
           + padL(r.lED === null ? '-' : r.lED, 7)
+          + padL(r.lCuts === null ? '-' : r.lCuts, 6)
+          + padL(r.lPruned === null ? '-' : r.lPruned, 7)
           + '  ' + r.verdict + '\n';
       if(!r.lSuccess && r.lReason && r.lReason !== 'no path') txt += '  LSB path invalid: ' + r.lReason + '\n';
     }
-    txt += '-----------------------------------------------------------------------------------------------\n';
+    txt += '---------------------------------------------------------------------------------------------------------------\n';
     if(acc.n > 0){
       txt += pad('AVG', 9) + padL('', 12)
           + padL(fmtTime(acc.aTime/acc.n), 10) + padL(fmtTime(acc.lTime/acc.n), 10)
@@ -1110,6 +1249,8 @@ function massTest(reuse){
           + padL(Math.round(acc.lBT/acc.n), 8) + padL(Math.round(acc.lParks/acc.n), 6)
           + padL(Math.round(acc.lRes/acc.n), 5) + padL(Math.round(acc.lKills/acc.n), 6)
           + padL(Math.round(acc.lED/acc.n), 7)
+          + padL(Math.round(acc.lCuts/acc.n), 6)
+          + padL(Math.round(acc.lPruned/acc.n), 7)
           + '  (n=' + acc.n + ')\n';
     }
     txt += '\nSUCCESS  A*: ' + aSuccess + '/' + MASS_N + '   LSB: ' + lSuccess + '/' + MASS_N + '\n';
@@ -1121,15 +1262,18 @@ function massTest(reuse){
       for(var si=0; si<rows.length; si++)
         if(rows[si].type === t2.name && rows[si].aSuccess && rows[si].lSuccess) sub.push(rows[si]);
       if(sub.length === 0){ txt += '  ' + pad(t2.name, 9) + '  (none)\n'; continue; }
-      var aAvgSum = 0, lAvgSum = 0, lBTSum = 0, lEDSum = 0;
+      var aAvgSum = 0, lAvgSum = 0, lBTSum = 0, lEDSum = 0, lCutsSum = 0, lPrunedSum = 0;
       for(var xi=0; xi<sub.length; xi++){
         aAvgSum += sub[xi].aExp; lAvgSum += sub[xi].lExp;
         lBTSum += sub[xi].lBT || 0; lEDSum += sub[xi].lED || 0;
+        lCutsSum += sub[xi].lCuts || 0; lPrunedSum += sub[xi].lPruned || 0;
       }
       txt += '  ' + pad(t2.name, 9) + '  A* exp ' + padL(Math.round(aAvgSum/sub.length), 7)
            + '   LSB exp ' + padL(Math.round(lAvgSum/sub.length), 7)
-           + '   LSB bt ' + padL(Math.round(lBTSum/sub.length), 7)
-           + '   LSB eDead ' + padL(Math.round(lEDSum/sub.length), 7)
+           + '   bt ' + padL(Math.round(lBTSum/sub.length), 6)
+           + '   eDead ' + padL(Math.round(lEDSum/sub.length), 6)
+           + '   cuts ' + padL(Math.round(lCutsSum/sub.length), 5)
+           + '   pruned ' + padL(Math.round(lPrunedSum/sub.length), 6)
            + '   n=' + sub.length + '\n';
     }
     out.textContent = txt;
