@@ -24,6 +24,7 @@
                 border:1px solid #333; white-space:pre; }
   .banner { background:#222; padding:6px 10px; border-radius:4px; font-size:12px;
             color:#ff0; margin-bottom:6px; display:none; }
+  .hint { font-size:11px; color:#666; margin-left:8px; }
 </style>
 </head>
 <body>
@@ -49,7 +50,8 @@
   <button onclick="setScenario('maze_kruskal')">Maze Kruskal</button>
   <button onclick="setScenario('maze_any')">Maze (random)</button>
   <button onclick="togglePause()" id="pauseBtn">Pause</button>
-  <button onclick="restartSame()">Replay</button>
+  <button onclick="replay()">Replay</button>
+  <span class="hint">[space] pause  [r] replay</span>
 </div>
 
 <div class="panel" style="margin-bottom:8px;">
@@ -58,15 +60,15 @@
 </div>
 
 <div class="panel" style="margin-bottom:8px;">
-  <span style="color:#888;font-size:12px;margin-right:6px;">Alg-time per animation frame:</span>
-  <button class="speed-btn" data-ns="10"    onclick="setNsPerFrame(10)">10ns</button>
-  <button class="speed-btn" data-ns="100"   onclick="setNsPerFrame(100)">100ns</button>
-  <button class="speed-btn" data-ns="1000"  onclick="setNsPerFrame(1000)">1us</button>
-  <button class="speed-btn" data-ns="10000" onclick="setNsPerFrame(10000)">10us</button>
-  <button class="speed-btn" data-ns="100000" onclick="setNsPerFrame(100000)">100us</button>
-  <button class="speed-btn" data-ns="1000000" onclick="setNsPerFrame(1000000)">1ms</button>
-  <button class="speed-btn" data-ns="10000000" onclick="setNsPerFrame(10000000)">10ms</button>
-  <button class="speed-btn" data-ns="999999999" onclick="setNsPerFrame(999999999)">Instant</button>
+  <span style="color:#888;font-size:12px;margin-right:6px;">Play whole run in:</span>
+  <button class="speed-btn" data-dur="3"     onclick="setSpeed(3)">3s</button>
+  <button class="speed-btn" data-dur="5"     onclick="setSpeed(5)">5s</button>
+  <button class="speed-btn" data-dur="10"    onclick="setSpeed(10)">10s</button>
+  <button class="speed-btn" data-dur="20"    onclick="setSpeed(20)">20s</button>
+  <button class="speed-btn" data-dur="30"    onclick="setSpeed(30)">30s</button>
+  <button class="speed-btn" data-dur="60"    onclick="setSpeed(60)">60s</button>
+  <button class="speed-btn" data-dur="120"   onclick="setSpeed(120)">120s</button>
+  <button class="speed-btn" data-dur="0"     onclick="setSpeed(0)">Instant</button>
 </div>
 
 <div class="row">
@@ -92,8 +94,6 @@ var CELL = 5;
 var RECORD_BUDGET = 1;
 var RECORD_MAX_FRAMES = 15000;
 var MASS_BUDGET = 8;
-var TICK_DELAY = 16;
-var NS_PER_FRAME = 10000;   // default: 10us of alg time per animation frame
 
 var CUT_CHECK_INTERVAL = 500;
 var CUT_MIN_VISITED_DELTA = 100;
@@ -102,6 +102,11 @@ var FORK_COOLDOWN = 4;
 var REVIVE_DEADEND_THRESHOLD = 150;
 var REVIVE_BATCH = 6;
 var MAX_ARCHIVE = 500;
+
+// Playback
+var PLAYBACK_DURATION_S = 20;     // target real seconds for whole run
+var MIN_FRAMES_PER_ANIM = 20;     // cap on frames we skip per animation frame
+var INSTANT = false;
 
 var START = [0, 0];
 var GOAL = [W-1, H-1];
@@ -268,11 +273,10 @@ function fmtTime(ms){
   if(ms < 1000)  return ms.toFixed(2) + 'ms';
   return (ms / 1000).toFixed(3) + 's';
 }
-function fmtNs(ns){
-  if(ns < 1000) return ns + 'ns';
-  if(ns < 1e6) return (ns/1000).toFixed(0) + 'us';
-  if(ns < 1e9) return (ns/1e6).toFixed(ns < 1e7 ? 1 : 0) + 'ms';
-  return (ns/1e9).toFixed(1) + 's';
+function fmtDur(sec){
+  if(sec < 60) return sec.toFixed(0) + 's';
+  var m = Math.floor(sec / 60), s = Math.round(sec - m*60);
+  return m + 'm' + (s ? s + 's' : '');
 }
 
 function MinHeap(){ this.h = []; }
@@ -552,7 +556,6 @@ LSB.prototype._addGenerated = function(k){
     if(y > this.vMaxY) this.vMaxY = y;
   }
 };
-
 LSB.prototype._markDead = function(k){
   if(!this.dead[k]){
     this.dead[k] = 1;
@@ -560,7 +563,6 @@ LSB.prototype._markDead = function(k){
     if(this._recording) this._deltaDead.push(k);
   }
 };
-
 LSB.prototype._unpark = function(n){
   this.parked.sort(function(a,b){ return a.scoreCache - b.scoreCache; });
   var take = Math.min(n, this.parked.length);
@@ -571,7 +573,6 @@ LSB.prototype._unpark = function(n){
     this.resumes++;
   }
 };
-
 LSB.prototype._reviveFromArchive = function(n){
   if(this.archive.length === 0) return 0;
   this.archive.sort(function(a,b){ return a.scoreCache - b.scoreCache; });
@@ -585,7 +586,6 @@ LSB.prototype._reviveFromArchive = function(n){
   }
   return take;
 };
-
 LSB.prototype._shouldPark = function(b){
   if(this.branches.length <= this.minActive) return false;
   if(this.parkedFull) return false;
@@ -616,7 +616,6 @@ LSB.prototype._checkForCuts = function(){
     var ra = find(a), rb = find(b);
     if(ra !== rb) parent[ra] = rb;
   }
-
   for(var y=0; y<H; y++){
     var base = y * W;
     for(var x=0; x<W; x++){
@@ -626,7 +625,6 @@ LSB.prototype._checkForCuts = function(){
       if(y + 1 < H && this.visited[k + W]) union(k, k + W);
     }
   }
-
   var bbox = {};
   for(var yy=0; yy<H; yy++){
     var b2 = yy * W;
@@ -644,7 +642,6 @@ LSB.prototype._checkForCuts = function(){
       }
     }
   }
-
   var cutRoots = {};
   var anyCut = false;
   var oMinX = this.openMinX, oMaxX = this.openMaxX;
@@ -655,7 +652,6 @@ LSB.prototype._checkForCuts = function(){
     else if(b3.minX <= oMinX && b3.maxX >= oMaxX){ cutRoots[r2] = 'H'; anyCut = true; }
   }
   if(!anyCut) return;
-
   var inCut = new Uint8Array(N);
   for(var y3=0; y3<H; y3++){
     var b4 = y3 * W;
@@ -666,7 +662,6 @@ LSB.prototype._checkForCuts = function(){
       if(cutRoots[r3]) inCut[k3] = 1;
     }
   }
-
   var goalK = this.goalK;
   var reached = new Uint8Array(N);
   var queue = new Int32Array(N);
@@ -687,7 +682,6 @@ LSB.prototype._checkForCuts = function(){
       queue[qt++] = nk;
     }
   }
-
   var pruned = 0;
   for(var y4=0; y4<H; y4++){
     var b5 = y4 * W;
@@ -707,7 +701,6 @@ LSB.prototype._checkForCuts = function(){
       pruned++;
     }
   }
-
   var survivingActive = [];
   for(var bi2=0; bi2<this.branches.length; bi2++){
     var br = this.branches[bi2];
@@ -715,7 +708,6 @@ LSB.prototype._checkForCuts = function(){
     else this.cutKilledBranches++;
   }
   this.branches = survivingActive;
-
   var survivingParked = [];
   for(var pi2=0; pi2<this.parked.length; pi2++){
     var pb = this.parked[pi2];
@@ -723,7 +715,6 @@ LSB.prototype._checkForCuts = function(){
     else this.cutKilledBranches++;
   }
   this.parked = survivingParked;
-
   var survivingArchive = [];
   for(var ai=0; ai<this.archive.length; ai++){
     var ab = this.archive[ai];
@@ -731,11 +722,7 @@ LSB.prototype._checkForCuts = function(){
     else this.cutKilledBranches++;
   }
   this.archive = survivingArchive;
-
-  if(pruned > 0){
-    this.cutsMade++;
-    this.cutCellsPruned += pruned;
-  }
+  if(pruned > 0){ this.cutsMade++; this.cutCellsPruned += pruned; }
 };
 
 LSB.prototype.step = function(budget){
@@ -747,26 +734,19 @@ LSB.prototype.step = function(budget){
       this._unpark(this.minActive - this.branches.length);
     }
     if(this.branches.length === 0){
-      if(this.parked.length > 0){
-        this._unpark(this.minActive);
-      } else if(this.archive.length > 0){
-        this._reviveFromArchive(this.minActive);
-      } else {
-        this.done = true; this.exhausted = true; break;
-      }
+      if(this.parked.length > 0){ this._unpark(this.minActive); }
+      else if(this.archive.length > 0){ this._reviveFromArchive(this.minActive); }
+      else { this.done = true; this.exhausted = true; break; }
     }
-
     this.tick++;
     var novelBefore = this._visitedCount;
     var oldBranches = this.branches;
     var ol = oldBranches.length;
-
     var scores = new Array(ol);
     for(var si=0; si<ol; si++) scores[si] = oldBranches[si].scoreCache;
     scores.sort(function(a,b){ return a - b; });
     this.layerMedian = scores[Math.floor(ol / 2)];
     this.parkedFull = this.parked.length >= this.max_parked;
-
     var next = [];
     var stop = false;
     for(var bi=0; bi<ol; bi++){
@@ -774,7 +754,6 @@ LSB.prototype.step = function(budget){
       if(this.done){ stop = true; break; }
     }
     if(stop) break;
-
     if(next.length > this.max_branches){
       next.sort(function(a,b){ return a.scoreCache - b.scoreCache; });
     }
@@ -784,14 +763,12 @@ LSB.prototype.step = function(budget){
       next.length = this.max_branches;
     }
     this.branches = next;
-
     for(var oi=0; oi<overflow.length; oi++){
       var ob = overflow[oi];
       if(this.parked.length < this.max_parked){
         ob.parked = true; this.parked.push(ob); this.parks++;
       } else if(this.archive.length < MAX_ARCHIVE){
-        this.archive.push(ob);
-        this.archived++;
+        this.archive.push(ob); this.archived++;
       } else {
         for(var pc=0; pc<ob.path.length; pc++){
           var c = ob.path[pc];
@@ -803,54 +780,39 @@ LSB.prototype.step = function(budget){
         this.kills++;
       }
     }
-
     var newKeys = new Array(this.branches.length);
     for(var fj=0; fj<this.branches.length; fj++) newKeys[fj] = this.branches[fj].k;
     var newSet = {};
     for(var fj=0; fj<newKeys.length; fj++) newSet[newKeys[fj]] = 1;
     var oldSet = {};
     for(var fi=0; fi<this._frontierKeys.length; fi++) oldSet[this._frontierKeys[fi]] = 1;
-
     for(var fi=0; fi<this._frontierKeys.length; fi++){
       var kk = this._frontierKeys[fi];
       if(!newSet[kk] && this.frontier[kk]){
-        this.frontier[kk] = 0;
-        this._frontierCount--;
+        this.frontier[kk] = 0; this._frontierCount--;
         if(rec) this._deltaFrontierRemoved.push(kk);
       }
     }
     for(var fj=0; fj<newKeys.length; fj++){
       var kk = newKeys[fj];
       if(!oldSet[kk] && !this.frontier[kk]){
-        this.frontier[kk] = 1;
-        this._frontierCount++;
+        this.frontier[kk] = 1; this._frontierCount++;
         if(rec) this._deltaFrontier.push(kk);
       }
     }
     this._frontierKeys = newKeys;
-
     var novelAfter = this._visitedCount;
-    if(novelAfter > novelBefore){
-      this.lastNovelTick = this.tick;
-      this.deadEndStreak = 0;
-    } else {
-      this.deadEndStreak++;
-    }
-
+    if(novelAfter > novelBefore){ this.lastNovelTick = this.tick; this.deadEndStreak = 0; }
+    else this.deadEndStreak++;
     if(this.deadEndStreak >= REVIVE_DEADEND_THRESHOLD){
-      if(this.parked.length > 0){
-        this._unpark(REVIVE_BATCH);
-      } else if(this.archive.length > 0){
-        this._reviveFromArchive(REVIVE_BATCH);
-      }
+      if(this.parked.length > 0) this._unpark(REVIVE_BATCH);
+      else if(this.archive.length > 0) this._reviveFromArchive(REVIVE_BATCH);
       this.deadEndStreak = 0;
     }
-
     if(this.tick - this.lastNovelTick > this.stallThreshold && this.parked.length > 0){
       this._unpark(this.minActive);
       this.lastNovelTick = this.tick;
     }
-
     if(this.scar_decay > 0 && this.tick % 300 === 0){
       for(var sk in this.scarKeys){
         var kv = parseInt(sk, 10);
@@ -859,7 +821,6 @@ LSB.prototype.step = function(budget){
         else this.scar[kv] = v;
       }
     }
-
     if(this.tick - this.cutCheckTick >= CUT_CHECK_INTERVAL){
       this.cutCheckTick = this.tick;
       this._checkForCuts();
@@ -872,13 +833,11 @@ LSB.prototype.stepBranch = function(b, next){
   var W = this.W, H = this.H, N = this.N;
   if(b.k === this.goalK){ this.done = true; this.path = b.path; return; }
   if(!this.expanded[b.k]){ this.expanded[b.k] = 1; this._expandedCount++; }
-
   var x0 = b.cell[0], y0 = b.cell[1];
   var grid = this.grid;
   var openCount = this.openCount;
   var pathSet = b.pathSet;
   var opts = [];
-
   for(var i=0; i<4; i++){
     var nx = x0 + N4[i][0];
     var ny = y0 + N4[i][1];
@@ -897,36 +856,26 @@ LSB.prototype.stepBranch = function(b, next){
     }
     opts.push([nx, ny, kk]);
   }
-
   if(opts.length === 0){
     if(this.backtrack(b, next)) return;
     next.push(b);
     return;
   }
-
   var dtg = this.dtg;
   opts.sort(function(p, q){ return dtg[p[2]] - dtg[q[2]]; });
   var primary = opts[0];
-
   var canFork = (b.depth - b.lastForkDepth) >= FORK_COOLDOWN;
-
   if(opts.length > 1 && canFork){
     var bestD = dtg[primary[2]];
     var tiedCount = 1;
     for(var ti=1; ti<opts.length; ti++) if(Math.abs(dtg[opts[ti][2]] - bestD) < this.tryEps) tiedCount++;
-
     if(tiedCount > 1){
       var wrote = 1;
       for(var k2=1; k2<opts.length && wrote<tiedCount; k2++){
         if(Math.abs(dtg[opts[k2][2]] - bestD) >= this.tryEps) continue;
         var nb = b.clone(N);
         var nt = opts[k2];
-        nb.stack.push({
-          cell: b.cell, k: b.k,
-          options: opts.slice(),
-          nextIdx: tiedCount,
-          pathIdx: b.path.length - 1
-        });
+        nb.stack.push({ cell: b.cell, k: b.k, options: opts.slice(), nextIdx: tiedCount, pathIdx: b.path.length - 1 });
         nb.path.push(nt);
         nb.pathSet[nt[2]] = 1;
         nb.cameFrom = b.cell;
@@ -938,30 +887,14 @@ LSB.prototype.stepBranch = function(b, next){
         next.push(nb);
         wrote++;
       }
-      b.stack.push({
-        cell: b.cell, k: b.k,
-        options: opts,
-        nextIdx: tiedCount,
-        pathIdx: b.path.length - 1
-      });
+      b.stack.push({ cell: b.cell, k: b.k, options: opts, nextIdx: tiedCount, pathIdx: b.path.length - 1 });
       b.lastForkDepth = b.depth;
     } else {
-      b.stack.push({
-        cell: b.cell, k: b.k,
-        options: opts,
-        nextIdx: 1,
-        pathIdx: b.path.length - 1
-      });
+      b.stack.push({ cell: b.cell, k: b.k, options: opts, nextIdx: 1, pathIdx: b.path.length - 1 });
     }
   } else if(opts.length > 1){
-    b.stack.push({
-      cell: b.cell, k: b.k,
-      options: opts,
-      nextIdx: 1,
-      pathIdx: b.path.length - 1
-    });
+    b.stack.push({ cell: b.cell, k: b.k, options: opts, nextIdx: 1, pathIdx: b.path.length - 1 });
   }
-
   b.path.push(primary);
   b.pathSet[primary[2]] = 1;
   b.cameFrom = b.cell;
@@ -969,9 +902,7 @@ LSB.prototype.stepBranch = function(b, next){
   b.depth++;
   b.scoreCache = dtg[primary[2]] + 0.25 * b.depth;
   this._addGenerated(primary[2]);
-
   if(b.k === this.goalK){ this.done = true; this.path = b.path; return; }
-
   if(this._shouldPark(b)){
     if(this.parked.length < this.max_parked){
       b.parked = true; this.parked.push(b); this.parks++;
@@ -991,7 +922,6 @@ LSB.prototype.backtrack = function(b, next){
       var nt = top.options[top.nextIdx];
       top.nextIdx++;
       if(this.dead[nt[2]] && nt[2] !== this.goalK) continue;
-
       for(var i = b.path.length - 1; i > top.pathIdx; i--){
         var c = b.path[i];
         b.pathSet[c[1]*W + c[0]] = 0;
@@ -1062,7 +992,7 @@ function getStats(algo, isLSB){
   };
 }
 
-// =============== recording (lockstep + timestamps) ===============
+// =============== recording ===============
 function initFrame(algo, isLSB, t_ms){
   return {
     t_ms: t_ms,
@@ -1075,7 +1005,6 @@ function initFrame(algo, isLSB, t_ms){
     stats: getStats(algo, isLSB)
   };
 }
-
 function makeFrame(algo, isLSB, t_ms){
   var addVisited = algo._deltaVisited; algo._deltaVisited = [];
   var addFrontier = algo._deltaFrontier; algo._deltaFrontier = [];
@@ -1092,15 +1021,12 @@ function makeFrame(algo, isLSB, t_ms){
     stats: getStats(algo, isLSB)
   };
 }
-
 function buildRecording(){
   var a = new AStar(grid, START, GOAL);
   var l = new LSB(grid, START, GOAL);
   a._recording = true; l._recording = true;
-
   var framesA = [ initFrame(a, false, 0) ];
   var framesL = [ initFrame(l, true, 0) ];
-
   while((!a.done || !l.done) && framesA.length < RECORD_MAX_FRAMES){
     if(!a.done) a.step(RECORD_BUDGET);
     if(!l.done) l.step(RECORD_BUDGET);
@@ -1108,13 +1034,9 @@ function buildRecording(){
     framesA.push(makeFrame(a, false, t_ms));
     framesL.push(makeFrame(l, true, t_ms));
   }
-
   a._recording = false; l._recording = false;
-
   return {
-    framesA: framesA,
-    framesL: framesL,
-    ticks: framesA.length,
+    framesA: framesA, framesL: framesL, ticks: framesA.length,
     totalMs: Math.max(a.algMs, l.algMs),
     grid: grid, START: START, GOAL: GOAL, W: W, H: H
   };
@@ -1139,8 +1061,6 @@ function applyFrame(state, frame){
   for(var k=0; k<frame.remFrontier.length; k++) delete state.frontier[frame.remFrontier[k]];
   for(var m=0; m<frame.addDead.length; m++) state.dead[frame.addDead[m]] = true;
 }
-
-// Advance to the latest frame whose t_ms <= target_ms (monotonic).
 function advanceToTime(target_ms){
   var lastIdx = recording.ticks - 1;
   while(playbackIdx < lastIdx && recording.framesA[playbackIdx + 1].t_ms <= target_ms){
@@ -1153,10 +1073,8 @@ function advanceToTime(target_ms){
     currentL.path = fl.path; currentL.parked = fl.parked; currentL.stats = fl.stats;
   }
 }
-
 function resetPlayback(){
-  playbackIdx = -1;
-  playbackMs = 0;
+  playbackIdx = -1; playbackMs = 0;
   playbackA = { visited:{}, frontier:{}, dead:{} };
   playbackL = { visited:{}, frontier:{}, dead:{} };
   currentA = { path:null, parked:null, stats:null };
@@ -1174,7 +1092,6 @@ var COLOR = {
   wall:'#555', open:'#000', start:'#0a0', goal:'#c0c',
   frontier:'#ff0', parked:'#f80', visited:'#2a4a7a', path:'#0ff', dead:'#a00'
 };
-
 function draw(ctx, g, view, path, parked, W, H){
   ctx.fillStyle = COLOR.open;
   ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
@@ -1198,7 +1115,6 @@ function draw(ctx, g, view, path, parked, W, H){
     }
   }
 }
-
 function fmtStats(stats){
   if(!stats) return '';
   var s = 'expanded: <b>' + stats.expanded + '</b><br>';
@@ -1220,7 +1136,6 @@ function fmtStats(stats){
   s += '<br>alg time (recorded): <b>' + fmtTime(stats.algMs) + '</b>';
   return s;
 }
-
 function renderCurrent(){
   draw(ctxA, recording.grid, playbackA, currentA.path, currentA.parked, recording.W, recording.H);
   draw(ctxL, recording.grid, playbackL, currentL.path, currentL.parked, recording.W, recording.H);
@@ -1231,19 +1146,28 @@ function renderCurrent(){
   if(recording){
     var total = recording.totalMs;
     var meta = 't = ' + fmtTime(playbackMs) + ' / ' + fmtTime(total) +
-               '   frame ' + (playbackIdx < 0 ? 0 : playbackIdx) + ' / ' + (recording.ticks - 1) +
-               '   wall clock (record): <b>' + fmtTime(recording.computeMs || 0) + '</b>';
+               '  |  frame ' + (playbackIdx < 0 ? 0 : playbackIdx) + ' / ' + (recording.ticks - 1) +
+               '  |  wall ' + fmtTime(recording.computeMs || 0);
     document.getElementById('metaA').innerHTML = meta;
     document.getElementById('metaL').innerHTML = meta;
   }
 }
 
-function setNsPerFrame(ns){
-  NS_PER_FRAME = ns;
+function setSpeed(durSec){
+  if(durSec === 0){ INSTANT = true; }
+  else { INSTANT = false; PLAYBACK_DURATION_S = durSec; }
   var btns = document.querySelectorAll('.speed-btn');
   for(var i=0; i<btns.length; i++){
-    var v = parseFloat(btns[i].getAttribute('data-ns'));
-    btns[i].className = (v === ns) ? 'speed-btn speed-on' : 'speed-btn';
+    var v = parseFloat(btns[i].getAttribute('data-dur'));
+    btns[i].className = (v === durSec) ? 'speed-btn speed-on' : 'speed-btn';
+  }
+  // If finished, reset so the user can watch at new speed
+  if(finished && recording){
+    resetPlayback();
+    finished = false;
+    paused = false;
+    document.getElementById('pauseBtn').innerText = 'Pause';
+    renderCurrent();
   }
 }
 
@@ -1260,7 +1184,6 @@ function setSize(w, h){
   }
   setScenario('maze_any');
 }
-
 function setScenario(name){
   if(name === 'open'){        START = [0,0]; GOAL = [W-1,H-1]; grid = makeOpen(); }
   else if(name === 'sparse'){ START = [0,0]; GOAL = [W-1,H-1]; grid = makeSparse(); }
@@ -1277,8 +1200,18 @@ function setScenario(name){
   }
   buildAndPlay();
 }
-function restartSame(){ buildAndPlay(); }
-
+function replay(){
+  if(!recording) return;
+  resetPlayback();
+  paused = false; finished = false; lastFrameTime = 0;
+  document.getElementById('pauseBtn').innerText = 'Pause';
+  renderCurrent();
+}
+function togglePause(){
+  if(finished){ replay(); return; }
+  paused = !paused;
+  document.getElementById('pauseBtn').innerText = paused ? 'Resume' : 'Pause';
+}
 function buildAndPlay(){
   var banner = document.getElementById('banner');
   banner.style.display = 'block';
@@ -1302,21 +1235,18 @@ function buildAndPlay(){
   }, 20);
 }
 
-function togglePause(){
-  if(finished) return;
-  paused = !paused;
-  document.getElementById('pauseBtn').innerText = paused ? 'Resume' : 'Pause';
-}
-
 function loop(now){
   requestAnimationFrame(loop);
-  if(paused || finished || !recording) return;
-  if(now - lastFrameTime < TICK_DELAY) return;
+  if(lastFrameTime === 0){ lastFrameTime = now; return; }
+  var dt = now - lastFrameTime;
   lastFrameTime = now;
-
+  if(paused || finished || !recording) return;
   var total = recording.totalMs;
-
-  if(NS_PER_FRAME >= 1e8){
+  if(total <= 0){
+    finished = true;
+    return;
+  }
+  if(INSTANT){
     playbackMs = total;
     advanceToTime(playbackMs);
     finished = true;
@@ -1324,10 +1254,11 @@ function loop(now){
     document.getElementById('pauseBtn').innerText = 'Done';
     return;
   }
-
-  // advance alg-time clock by NS_PER_FRAME each animation frame
-  playbackMs += NS_PER_FRAME / 1e6;
-
+  // Effective duration: user's target, but not so short we skip > MIN_FRAMES_PER_ANIM per animation frame.
+  var minDurMs = (recording.ticks / (60 * MIN_FRAMES_PER_ANIM)) * 1000;
+  var durMs = Math.max(PLAYBACK_DURATION_S * 1000, minDurMs);
+  var rate = total / durMs;   // alg-ms per real-ms
+  playbackMs += dt * rate;
   if(playbackMs >= total){
     playbackMs = total;
     advanceToTime(playbackMs);
@@ -1336,10 +1267,14 @@ function loop(now){
     document.getElementById('pauseBtn').innerText = 'Done';
     return;
   }
-
   advanceToTime(playbackMs);
   renderCurrent();
 }
+
+document.addEventListener('keydown', function(e){
+  if(e.key === ' '){ e.preventDefault(); togglePause(); }
+  else if(e.key === 'r' || e.key === 'R'){ replay(); }
+});
 
 // =============== mass test ===============
 var MASS_N = 12;
@@ -1361,10 +1296,7 @@ function runBench(factory, isLSB){
     totalMs += last.algMs; reps++;
     if(totalMs >= MASS_MIN_TIME_MS) break;
   }
-  return {
-    stats: last.stats,
-    avgMs: totalMs / reps, reps: reps
-  };
+  return { stats: last.stats, avgMs: totalMs / reps, reps: reps };
 }
 
 function massTest(reuse){
@@ -1518,7 +1450,7 @@ function massTest(reuse){
   }, 30);
 }
 
-setNsPerFrame(10000);
+setSpeed(20);
 setSize(100, 50);
 requestAnimationFrame(loop);
 </script>
