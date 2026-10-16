@@ -100,10 +100,9 @@ var CUT_CHECK_INTERVAL = 500;
 var CUT_MIN_VISITED_DELTA = 100;
 var FORK_COOLDOWN = 4;
 
-// Revival / archive tunables
-var REVIVE_DEADEND_THRESHOLD = 150;   // consecutive backtracks without progress
-var REVIVE_BATCH = 6;                 // how many to pull per revival
-var MAX_ARCHIVE = 4000;
+var REVIVE_DEADEND_THRESHOLD = 150;
+var REVIVE_BATCH = 6;
+var MAX_ARCHIVE = 500;
 
 var START = [0, 0];
 var GOAL = [W-1, H-1];
@@ -374,15 +373,23 @@ AStar.prototype._recon = function(end){
 };
 
 // =============== LSB ===============
-function Branch(cell, path, cameFrom, W){
+// pathSet is a Uint8Array(N) so clone() is a native memcpy instead of
+// iterating over object keys.
+function Branch(cell, path, cameFrom, N, parentPathSet, W){
   this.cell = cell;
   this.k = cell[1] * W + cell[0];
   this.path = path.slice();
   this.cameFrom = cameFrom;
-  this.pathSet = {};
-  for(var i=0; i<this.path.length; i++){
-    var c = this.path[i];
-    this.pathSet[c[1]*W + c[0]] = 1;
+  this.W = W;
+  if(parentPathSet){
+    this.pathSet = new Uint8Array(N);
+    this.pathSet.set(parentPathSet);
+  } else {
+    this.pathSet = new Uint8Array(N);
+    for(var i=0; i<this.path.length; i++){
+      var c = this.path[i];
+      this.pathSet[c[1]*W + c[0]] = 1;
+    }
   }
   this.stack = [];
   this.parked = false;
@@ -390,8 +397,8 @@ function Branch(cell, path, cameFrom, W){
   this.depth = this.path.length - 1;
   this.lastForkDepth = -999;
 }
-Branch.prototype.clone = function(W){
-  var b = new Branch(this.cell, this.path, this.cameFrom, W);
+Branch.prototype.clone = function(N){
+  var b = new Branch(this.cell, this.path, this.cameFrom, N, this.pathSet, this.W);
   b.k = this.k;
   b.scoreCache = this.scoreCache;
   b.depth = this.depth;
@@ -412,17 +419,18 @@ function LSB(g, start, goal){
   this.grid = g; this.start = start; this.goal = goal;
   this.W = g[0].length; this.H = g.length;
   var W = this.W, H = this.H;
+  var N = W * H;
+  this.N = N;
 
   var scale = Math.max(1, Math.floor((W*H) / 3000));
   this.max_branches      = 16 * scale;
-  this.max_parked        = 200 * scale;
+  this.max_parked        = 100 * scale;
   this.scar_threshold    = 2.5;
   this.scar_decay        = 0.004;
   this.tryEps            = 0.5;
   this.minActive         = 4 * scale;
   this.stallThreshold    = 200 * scale;
 
-  var N = W * H;
   var dtg = new Float32Array(N);
   var gx = goal[0], gy = goal[1];
   for(var y=0; y<H; y++){
@@ -471,12 +479,16 @@ function LSB(g, start, goal){
   this.scarKeys  = {};
 
   this._visitedCount = 0;
+  // Incremental visited bounds for cheap cut-check gating
+  this.vMinX = W; this.vMaxX = -1; this.vMinY = H; this.vMaxY = -1;
 
   var k0 = start[1]*W + start[0];
   this.visited[k0] = 1; this._visitedCount++;
   this.generated[k0] = 1;
+  this.vMinX = this.vMaxX = start[0];
+  this.vMinY = this.vMaxY = start[1];
 
-  var b = new Branch(start, [start], null, W);
+  var b = new Branch(start, [start], null, N, null, W);
   b.scoreCache = dtg[b.k];
   this.branches = [b];
   this.parked = [];
@@ -495,6 +507,7 @@ function LSB(g, start, goal){
   this.cutCellsPruned = 0;
   this.cutKilledBranches = 0;
   this.cutChecksRun = 0;
+  this.cutGateSkips = 0;
 
   this.layerMedian = 0;
   this.parkedFull = false;
@@ -507,6 +520,12 @@ LSB.prototype._addGenerated = function(k){
     this.visited[k] = 1;
     this.generated[k] = 1;
     this._visitedCount++;
+    var W = this.W;
+    var x = k % W, y = (k - x) / W;
+    if(x < this.vMinX) this.vMinX = x;
+    if(x > this.vMaxX) this.vMaxX = x;
+    if(y < this.vMinY) this.vMinY = y;
+    if(y > this.vMaxY) this.vMaxY = y;
   }
 };
 
@@ -521,8 +540,6 @@ LSB.prototype._unpark = function(n){
   }
 };
 
-// Pull best-scoring branches out of archive. On a big maze with an
-// exhaustion problem, this is the fallback that keeps the search alive.
 LSB.prototype._reviveFromArchive = function(n){
   if(this.archive.length === 0) return 0;
   this.archive.sort(function(a,b){ return a.scoreCache - b.scoreCache; });
@@ -530,8 +547,6 @@ LSB.prototype._reviveFromArchive = function(n){
   for(var j=0; j<take; j++){
     var b = this.archive.shift();
     b.parked = false;
-    // Reset its stack cursor? No — keep it where it was. But do reset
-    // the fork cooldown so it can split again immediately if useful.
     b.lastForkDepth = -999;
     this.branches.push(b);
     this.revived++;
@@ -547,8 +562,15 @@ LSB.prototype._shouldPark = function(b){
 
 LSB.prototype._checkForCuts = function(){
   var W = this.W, H = this.H;
-  var N = W * H;
+  var N = this.N;
   this.cutChecksRun++;
+
+  // Cheap gate: has the visited set even reached the open bbox extents
+  // in either axis? If not, no separator is possible.
+  var canV = this.vMinY <= this.openMinY && this.vMaxY >= this.openMaxY;
+  var canH = this.vMinX <= this.openMinX && this.vMaxX >= this.openMaxX;
+  if(!canV && !canH){ this.cutGateSkips++; return; }
+
   if(this._visitedCount - this.lastCutCheckVisited < CUT_MIN_VISITED_DELTA) return;
   this.lastCutCheckVisited = this._visitedCount;
 
@@ -670,7 +692,6 @@ LSB.prototype._checkForCuts = function(){
   }
   this.parked = survivingParked;
 
-  // Archive also gets pruned of wrong-side cells
   var survivingArchive = [];
   for(var ai=0; ai<this.archive.length; ai++){
     var ab = this.archive[ai];
@@ -687,7 +708,7 @@ LSB.prototype._checkForCuts = function(){
 
 LSB.prototype.step = function(budget){
   var t0 = performance.now();
-  var W = this.W, H = this.H;
+  var W = this.W, H = this.H, N = this.N;
   for(var i=0; i<budget && !this.done; i++){
     if(this.branches.length < this.minActive && this.parked.length > 0){
       this._unpark(this.minActive - this.branches.length);
@@ -696,7 +717,6 @@ LSB.prototype.step = function(budget){
       if(this.parked.length > 0){
         this._unpark(this.minActive);
       } else if(this.archive.length > 0){
-        // Last resort before declaring exhausted: pull from archive.
         this._reviveFromArchive(this.minActive);
       } else {
         this.done = true; this.exhausted = true; break;
@@ -737,11 +757,9 @@ LSB.prototype.step = function(budget){
       if(this.parked.length < this.max_parked){
         ob.parked = true; this.parked.push(ob); this.parks++;
       } else if(this.archive.length < MAX_ARCHIVE){
-        // Instead of killing, archive it. Preserves the decision stack.
         this.archive.push(ob);
         this.archived++;
       } else {
-        // Both queues full: scar and kill as before.
         for(var pc=0; pc<ob.path.length; pc++){
           var c = ob.path[pc];
           var k = c[1]*W + c[0];
@@ -759,14 +777,12 @@ LSB.prototype.step = function(budget){
     var novelAfter = this._visitedCount;
     if(novelAfter > novelBefore){
       this.lastNovelTick = this.tick;
-      this.deadEndStreak = 0;   // we made progress, reset streak
+      this.deadEndStreak = 0;
     } else {
       this.deadEndStreak++;
     }
 
-    // Streak-based revival: too many dead ends in a row
     if(this.deadEndStreak >= REVIVE_DEADEND_THRESHOLD){
-      // First try unparking
       if(this.parked.length > 0){
         this._unpark(REVIVE_BATCH);
       } else if(this.archive.length > 0){
@@ -798,13 +814,14 @@ LSB.prototype.step = function(budget){
 };
 
 LSB.prototype.stepBranch = function(b, next){
-  var W = this.W, H = this.H;
+  var W = this.W, H = this.H, N = this.N;
   if(b.k === this.goalK){ this.done = true; this.path = b.path; return; }
   this.expanded[b.k] = 1;
 
   var x0 = b.cell[0], y0 = b.cell[1];
   var grid = this.grid;
   var openCount = this.openCount;
+  var pathSet = b.pathSet;
   var opts = [];
 
   for(var i=0; i<4; i++){
@@ -813,7 +830,7 @@ LSB.prototype.stepBranch = function(b, next){
     if(nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
     if(grid[ny][nx] !== 0) continue;
     var kk = ny * W + nx;
-    if(b.pathSet[kk]) continue;
+    if(pathSet[kk]) continue;
     if(kk === this.goalK){ opts.push([nx, ny, kk]); continue; }
     if(this.dead[kk]) continue;
     if(openCount[kk] <= 1){
@@ -847,7 +864,7 @@ LSB.prototype.stepBranch = function(b, next){
       var wrote = 1;
       for(var k2=1; k2<opts.length && wrote<tiedCount; k2++){
         if(Math.abs(dtg[opts[k2][2]] - bestD) >= this.tryEps) continue;
-        var nb = b.clone(W);
+        var nb = b.clone(N);
         var nt = opts[k2];
         nb.stack.push({
           cell: b.cell, k: b.k,
@@ -922,7 +939,7 @@ LSB.prototype.backtrack = function(b, next){
 
       for(var i = b.path.length - 1; i > top.pathIdx; i--){
         var c = b.path[i];
-        delete b.pathSet[c[1]*W + c[0]];
+        b.pathSet[c[1]*W + c[0]] = 0;
       }
       b.path.length = top.pathIdx + 1;
       b.path.push(nt);
@@ -973,6 +990,7 @@ function getStats(algo, isLSB){
     cutCellsPruned: isLSB ? algo.cutCellsPruned : null,
     cutKilledBranches: isLSB ? algo.cutKilledBranches : null,
     cutChecksRun: isLSB ? algo.cutChecksRun : null,
+    cutGateSkips: isLSB ? algo.cutGateSkips : null,
     archived: isLSB ? algo.archived : null,
     revived: isLSB ? algo.revived : null,
     archiveSize: isLSB ? algo.archive.length : null,
@@ -1132,7 +1150,7 @@ function fmtStats(stats){
     s += 'kills: <b>' + stats.kills + '</b>  parked: <b>' + stats.parkedCount + '</b><br>';
     s += 'early dead: <b>' + stats.earlyDeaths + '</b><br>';
     s += 'archive: <b>' + stats.archiveSize + '</b>  archived: <b>' + stats.archived + '</b>  revived: <b>' + stats.revived + '</b><br>';
-    s += 'cuts: <b>' + stats.cutsMade + '</b>  checks: <b>' + stats.cutChecksRun + '</b>  pruned: <b>' + stats.cutCellsPruned + '</b><br>';
+    s += 'cuts: <b>' + stats.cutsMade + '</b>  checks: <b>' + stats.cutChecksRun + '</b>  gate-skips: <b>' + stats.cutGateSkips + '</b>  pruned: <b>' + stats.cutCellsPruned + '</b><br>';
     s += 'cut-killed branches: <b>' + stats.cutKilledBranches + '</b><br>';
   }
   s += 'done: <b>' + stats.done + '</b>';
@@ -1265,7 +1283,7 @@ function runOneOnce(factory, isLSB){
   var iters = 0;
   while(!algo.done && iters < 60000){ algo.step(MASS_BUDGET); iters++; }
   var s = getStats(algo, isLSB);
-  return { stats: s, algMs: algo.algMs, backtracks: s.backtracks, parks: s.parks, resumes: s.resumes, kills: s.kills, earlyDeaths: s.earlyDeaths, cutsMade: s.cutsMade, cutCellsPruned: s.cutCellsPruned, cutKilledBranches: s.cutKilledBranches, cutChecksRun: s.cutChecksRun, archived: s.archived, revived: s.revived, archiveSize: s.archiveSize };
+  return { stats: s, algMs: algo.algMs, backtracks: s.backtracks, parks: s.parks, resumes: s.resumes, kills: s.kills, earlyDeaths: s.earlyDeaths, cutsMade: s.cutsMade, cutCellsPruned: s.cutCellsPruned, cutKilledBranches: s.cutKilledBranches, cutChecksRun: s.cutChecksRun, cutGateSkips: s.cutGateSkips, archived: s.archived, revived: s.revived, archiveSize: s.archiveSize };
 }
 function runBench(factory, isLSB){
   var totalMs = 0, reps = 0, last = null;
@@ -1279,6 +1297,7 @@ function runBench(factory, isLSB){
     resumes: last.resumes, kills: last.kills, earlyDeaths: last.earlyDeaths,
     cutsMade: last.cutsMade, cutCellsPruned: last.cutCellsPruned,
     cutKilledBranches: last.cutKilledBranches, cutChecksRun: last.cutChecksRun,
+    cutGateSkips: last.cutGateSkips,
     archived: last.archived, revived: last.revived, archiveSize: last.archiveSize,
     avgMs: totalMs / reps, reps: reps
   };
@@ -1303,7 +1322,7 @@ function massTest(reuse){
     }
     var rows = [];
     var aSuccess = 0, lSuccess = 0, aWins = 0, lWins = 0, ties = 0;
-    var acc = { aTime:0, lTime:0, aExp:0, lExp:0, aPath:0, lPath:0, lBT:0, lParks:0, lRes:0, lKills:0, lED:0, lCuts:0, lPruned:0, lCutKill:0, lChecks:0, lArch:0, lReviv:0, n:0 };
+    var acc = { aTime:0, lTime:0, aExp:0, lExp:0, aPath:0, lPath:0, lBT:0, lParks:0, lRes:0, lKills:0, lED:0, lCuts:0, lPruned:0, lCutKill:0, lChecks:0, lGate:0, lArch:0, lReviv:0, n:0 };
     for(var pi=0; pi<plans.length; pi++){
       var plan = plans[pi];
       var g = plan.fn(plan.seed);
@@ -1331,6 +1350,7 @@ function massTest(reuse){
         acc.lPruned += rl.cutCellsPruned || 0;
         acc.lCutKill += rl.cutKilledBranches || 0;
         acc.lChecks += rl.cutChecksRun || 0;
+        acc.lGate += rl.cutGateSkips || 0;
         acc.lArch += rl.archived || 0;
         acc.lReviv += rl.revived || 0;
         acc.n++;
@@ -1344,7 +1364,7 @@ function massTest(reuse){
         aSuccess: aOk, lSuccess: lOk, lReason: rl.stats.pathReason,
         lBT: rl.backtracks, lParks: rl.parks, lRes: rl.resumes, lKills: rl.kills,
         lED: rl.earlyDeaths, lCuts: rl.cutsMade, lPruned: rl.cutCellsPruned,
-        lCutKill: rl.cutKilledBranches, lChecks: rl.cutChecksRun,
+        lCutKill: rl.cutKilledBranches, lChecks: rl.cutChecksRun, lGate: rl.cutGateSkips,
         lArch: rl.archived, lReviv: rl.revived,
         verdict: verdict
       });
@@ -1357,10 +1377,10 @@ function massTest(reuse){
     txt += pad('type', 9) + padL('seed', 12) + padL('A*t', 10) + padL('LSBt', 10)
          + padL('A*exp', 8) + padL('LSBexp', 9) + padL('A*pth', 7) + padL('LSBpth', 8)
          + padL('ok', 4) + padL('rep', 7) + padL('LSBbt', 8) + padL('park', 6) + padL('res', 5) + padL('kill', 6)
-         + padL('eDead', 7) + padL('chk', 5) + padL('cuts', 6) + padL('prune', 7) + padL('cKill', 7)
+         + padL('eDead', 7) + padL('chk', 5) + padL('gate', 6) + padL('cuts', 6) + padL('prune', 7) + padL('cKill', 7)
          + padL('arch', 6) + padL('rev', 5)
          + '  verdict\n';
-    txt += '----------------------------------------------------------------------------------------------------------------------------------------------\n';
+    txt += '------------------------------------------------------------------------------------------------------------------------------------------------------\n';
     for(var ri=0; ri<rows.length; ri++){
       var r = rows[ri];
       txt += pad(r.type, 9) + padL(r.seed.toString(16), 12)
@@ -1373,6 +1393,7 @@ function massTest(reuse){
           + padL(r.lRes === null ? '-' : r.lRes, 5) + padL(r.lKills === null ? '-' : r.lKills, 6)
           + padL(r.lED === null ? '-' : r.lED, 7)
           + padL(r.lChecks === null ? '-' : r.lChecks, 5)
+          + padL(r.lGate === null ? '-' : r.lGate, 6)
           + padL(r.lCuts === null ? '-' : r.lCuts, 6)
           + padL(r.lPruned === null ? '-' : r.lPruned, 7)
           + padL(r.lCutKill === null ? '-' : r.lCutKill, 7)
@@ -1381,7 +1402,7 @@ function massTest(reuse){
           + '  ' + r.verdict + '\n';
       if(!r.lSuccess && r.lReason && r.lReason !== 'no path') txt += '  LSB path invalid: ' + r.lReason + '\n';
     }
-    txt += '----------------------------------------------------------------------------------------------------------------------------------------------\n';
+    txt += '------------------------------------------------------------------------------------------------------------------------------------------------------\n';
     if(acc.n > 0){
       txt += pad('AVG', 9) + padL('', 12)
           + padL(fmtTime(acc.aTime/acc.n), 10) + padL(fmtTime(acc.lTime/acc.n), 10)
@@ -1392,6 +1413,7 @@ function massTest(reuse){
           + padL(Math.round(acc.lRes/acc.n), 5) + padL(Math.round(acc.lKills/acc.n), 6)
           + padL(Math.round(acc.lED/acc.n), 7)
           + padL(Math.round(acc.lChecks/acc.n), 5)
+          + padL(Math.round(acc.lGate/acc.n), 6)
           + padL(Math.round(acc.lCuts/acc.n), 6)
           + padL(Math.round(acc.lPruned/acc.n), 7)
           + padL(Math.round(acc.lCutKill/acc.n), 7)
