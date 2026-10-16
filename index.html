@@ -58,16 +58,15 @@
 </div>
 
 <div class="panel" style="margin-bottom:8px;">
-  <span style="color:#888;font-size:12px;margin-right:6px;">Speed:</span>
-  <button class="speed-btn" data-sp="0.1"  onclick="setSpeed(0.1)">0.1x</button>
-  <button class="speed-btn" data-sp="0.25" onclick="setSpeed(0.25)">0.25x</button>
-  <button class="speed-btn" data-sp="0.5"  onclick="setSpeed(0.5)">0.5x</button>
-  <button class="speed-btn" data-sp="1"    onclick="setSpeed(1)">1x</button>
-  <button class="speed-btn" data-sp="2"    onclick="setSpeed(2)">2x</button>
-  <button class="speed-btn" data-sp="4"    onclick="setSpeed(4)">4x</button>
-  <button class="speed-btn" data-sp="16"   onclick="setSpeed(16)">16x</button>
-  <button class="speed-btn" data-sp="64"   onclick="setSpeed(64)">64x</button>
-  <button class="speed-btn" data-sp="9999" onclick="setSpeed(9999)">Instant</button>
+  <span style="color:#888;font-size:12px;margin-right:6px;">Alg-time per animation frame:</span>
+  <button class="speed-btn" data-ns="10"    onclick="setNsPerFrame(10)">10ns</button>
+  <button class="speed-btn" data-ns="100"   onclick="setNsPerFrame(100)">100ns</button>
+  <button class="speed-btn" data-ns="1000"  onclick="setNsPerFrame(1000)">1us</button>
+  <button class="speed-btn" data-ns="10000" onclick="setNsPerFrame(10000)">10us</button>
+  <button class="speed-btn" data-ns="100000" onclick="setNsPerFrame(100000)">100us</button>
+  <button class="speed-btn" data-ns="1000000" onclick="setNsPerFrame(1000000)">1ms</button>
+  <button class="speed-btn" data-ns="10000000" onclick="setNsPerFrame(10000000)">10ms</button>
+  <button class="speed-btn" data-ns="999999999" onclick="setNsPerFrame(999999999)">Instant</button>
 </div>
 
 <div class="row">
@@ -94,7 +93,7 @@ var RECORD_BUDGET = 1;
 var RECORD_MAX_FRAMES = 15000;
 var MASS_BUDGET = 8;
 var TICK_DELAY = 16;
-var PLAYBACK_SPEED = 1;
+var NS_PER_FRAME = 10000;   // default: 10us of alg time per animation frame
 
 var CUT_CHECK_INTERVAL = 500;
 var CUT_MIN_VISITED_DELTA = 100;
@@ -236,22 +235,6 @@ var MAZE_TYPES = [
 function manhattan(a,b){ return Math.abs(a[0]-b[0]) + Math.abs(a[1]-b[1]); }
 var N4 = [[1,0],[-1,0],[0,1],[0,-1]];
 
-function forEachKey(arr, cb){
-  if(arr.length !== undefined){
-    for(var i=0; i<arr.length; i++) if(arr[i]) cb(i);
-  } else {
-    for(var k in arr) if(arr[k]) cb(parseInt(k, 10));
-  }
-}
-function countKeys(obj){
-  var n = 0;
-  if(obj.length !== undefined){
-    for(var i=0; i<obj.length; i++) if(obj[i]) n++;
-  } else {
-    for(var k in obj) if(obj[k]) n++;
-  }
-  return n;
-}
 function keysOf(obj){
   var out = [];
   if(obj.length !== undefined){
@@ -284,6 +267,12 @@ function fmtTime(ms){
   if(ms < 1)     return (ms * 1000).toFixed(0) + 'us';
   if(ms < 1000)  return ms.toFixed(2) + 'ms';
   return (ms / 1000).toFixed(3) + 's';
+}
+function fmtNs(ns){
+  if(ns < 1000) return ns + 'ns';
+  if(ns < 1e6) return (ns/1000).toFixed(0) + 'us';
+  if(ns < 1e9) return (ns/1e6).toFixed(ns < 1e7 ? 1 : 0) + 'ms';
+  return (ns/1e9).toFixed(1) + 's';
 }
 
 function MinHeap(){ this.h = []; }
@@ -320,20 +309,34 @@ Object.defineProperty(MinHeap.prototype, 'size', { get: function(){ return this.
 function AStar(g, start, goal){
   this.grid = g; this.start = start; this.goal = goal;
   this.W = g[0].length; this.H = g.length;
+  var W = this.W;
+  var k0 = start[1]*W + start[0];
+  this.k0 = k0;
   this.open = new MinHeap();
   this.open.push([manhattan(start,goal), 0, start]);
-  this.gMap = {}; this.gMap[start[1]*this.W + start[0]] = 0;
+  this.gMap = {}; this.gMap[k0] = 0;
   this.came = {};
   this.closed = {};
   this.visited = {}; this.generated = {}; this.expanded = {}; this.frontier = {};
-  var k0 = start[1]*this.W + start[0];
   this.visited[k0] = true; this.generated[k0] = true; this.frontier[k0] = true;
   this.done = false; this.exhausted = false; this.path = null; this.algMs = 0;
+  this._visitedCount = 1;
+  this._generatedCount = 1;
+  this._expandedCount = 0;
+  this._frontierCount = 1;
+  this._recording = false;
+  this._deltaVisited = [];
+  this._deltaFrontier = [];
+  this._deltaFrontierRemoved = [];
+  this._deltaDead = [];
+  this._pathValid = undefined;
+  this._pathReason = undefined;
 }
 AStar.prototype.step = function(budget){
   var t0 = performance.now();
   var spent = 0;
   var g = this.grid, W = this.W, H = this.H;
+  var rec = this._recording;
   while(spent < budget && !this.done){
     if(this.open.size === 0){ this.done = true; this.exhausted = true; break; }
     var item = this.open.pop();
@@ -342,7 +345,12 @@ AStar.prototype.step = function(budget){
     this.closed[kc] = true;
     this.visited[kc] = true;
     this.expanded[kc] = true;
-    delete this.frontier[kc];
+    this._expandedCount++;
+    if(this.frontier[kc]){
+      delete this.frontier[kc];
+      this._frontierCount--;
+      if(rec) this._deltaFrontierRemoved.push(kc);
+    }
     spent++;
     if(c[0] === this.goal[0] && c[1] === this.goal[1]){ this.done = true; this._recon(c); break; }
     for(var i=0; i<N4.length; i++){
@@ -358,9 +366,9 @@ AStar.prototype.step = function(budget){
         this.gMap[kn] = ng;
         this.came[kn] = c;
         this.open.push([ng + manhattan([nx,ny], this.goal), ng, [nx,ny]]);
-        this.frontier[kn] = true;
-        this.generated[kn] = true;
-        this.visited[kn] = true;
+        if(!this.frontier[kn]){ this.frontier[kn] = true; this._frontierCount++; if(rec) this._deltaFrontier.push(kn); }
+        if(!this.generated[kn]){ this.generated[kn] = true; this._generatedCount++; }
+        if(!this.visited[kn]){ this.visited[kn] = true; this._visitedCount++; if(rec) this._deltaVisited.push(kn); }
       }
     }
   }
@@ -373,8 +381,6 @@ AStar.prototype._recon = function(end){
 };
 
 // =============== LSB ===============
-// pathSet is a Uint8Array(N) so clone() is a native memcpy instead of
-// iterating over object keys.
 function Branch(cell, path, cameFrom, N, parentPathSet, W){
   this.cell = cell;
   this.k = cell[1] * W + cell[0];
@@ -479,18 +485,36 @@ function LSB(g, start, goal){
   this.scarKeys  = {};
 
   this._visitedCount = 0;
-  // Incremental visited bounds for cheap cut-check gating
+  this._generatedCount = 0;
+  this._expandedCount = 0;
+  this._frontierCount = 0;
+  this._deadCount = 0;
+
+  this._recording = false;
+  this._deltaVisited = [];
+  this._deltaFrontier = [];
+  this._deltaFrontierRemoved = [];
+  this._deltaDead = [];
+
+  this._pathValid = undefined;
+  this._pathReason = undefined;
+
   this.vMinX = W; this.vMaxX = -1; this.vMinY = H; this.vMaxY = -1;
+  this._frontierKeys = [];
 
   var k0 = start[1]*W + start[0];
   this.visited[k0] = 1; this._visitedCount++;
-  this.generated[k0] = 1;
+  this.generated[k0] = 1; this._generatedCount++;
   this.vMinX = this.vMaxX = start[0];
   this.vMinY = this.vMaxY = start[1];
 
   var b = new Branch(start, [start], null, N, null, W);
   b.scoreCache = dtg[b.k];
   this.branches = [b];
+  this._frontierKeys = [b.k];
+  this.frontier[b.k] = 1;
+  this._frontierCount = 1;
+
   this.parked = [];
   this.archive = [];
   this.done = false; this.exhausted = false; this.path = null;
@@ -517,15 +541,23 @@ function LSB(g, start, goal){
 
 LSB.prototype._addGenerated = function(k){
   if(!this.visited[k]){
-    this.visited[k] = 1;
-    this.generated[k] = 1;
-    this._visitedCount++;
+    this.visited[k] = 1; this._visitedCount++;
+    this.generated[k] = 1; this._generatedCount++;
+    if(this._recording) this._deltaVisited.push(k);
     var W = this.W;
     var x = k % W, y = (k - x) / W;
     if(x < this.vMinX) this.vMinX = x;
     if(x > this.vMaxX) this.vMaxX = x;
     if(y < this.vMinY) this.vMinY = y;
     if(y > this.vMaxY) this.vMaxY = y;
+  }
+};
+
+LSB.prototype._markDead = function(k){
+  if(!this.dead[k]){
+    this.dead[k] = 1;
+    this._deadCount++;
+    if(this._recording) this._deltaDead.push(k);
   }
 };
 
@@ -565,8 +597,6 @@ LSB.prototype._checkForCuts = function(){
   var N = this.N;
   this.cutChecksRun++;
 
-  // Cheap gate: has the visited set even reached the open bbox extents
-  // in either axis? If not, no separator is possible.
   var canV = this.vMinY <= this.openMinY && this.vMaxY >= this.openMaxY;
   var canH = this.vMinX <= this.openMinX && this.vMaxX >= this.openMaxX;
   if(!canV && !canH){ this.cutGateSkips++; return; }
@@ -669,6 +699,8 @@ LSB.prototype._checkForCuts = function(){
       if(this.visited[k4]) continue;
       if(this.dead[k4]) continue;
       this.dead[k4] = 1;
+      this._deadCount++;
+      if(this._recording) this._deltaDead.push(k4);
       this.cutDead[k4] = 1;
       this.scar[k4] += 0.5;
       this.scarKeys[k4] = 1;
@@ -709,6 +741,7 @@ LSB.prototype._checkForCuts = function(){
 LSB.prototype.step = function(budget){
   var t0 = performance.now();
   var W = this.W, H = this.H, N = this.N;
+  var rec = this._recording;
   for(var i=0; i<budget && !this.done; i++){
     if(this.branches.length < this.minActive && this.parked.length > 0){
       this._unpark(this.minActive - this.branches.length);
@@ -765,14 +798,36 @@ LSB.prototype.step = function(budget){
           var k = c[1]*W + c[0];
           this.scar[k] += 0.5;
           this.scarKeys[k] = 1;
-          this.dead[k] = 1;
+          this._markDead(k);
         }
         this.kills++;
       }
     }
 
-    for(var fi=0; fi<ol; fi++) this.frontier[oldBranches[fi].k] = 0;
-    for(var fj=0; fj<this.branches.length; fj++) this.frontier[this.branches[fj].k] = 1;
+    var newKeys = new Array(this.branches.length);
+    for(var fj=0; fj<this.branches.length; fj++) newKeys[fj] = this.branches[fj].k;
+    var newSet = {};
+    for(var fj=0; fj<newKeys.length; fj++) newSet[newKeys[fj]] = 1;
+    var oldSet = {};
+    for(var fi=0; fi<this._frontierKeys.length; fi++) oldSet[this._frontierKeys[fi]] = 1;
+
+    for(var fi=0; fi<this._frontierKeys.length; fi++){
+      var kk = this._frontierKeys[fi];
+      if(!newSet[kk] && this.frontier[kk]){
+        this.frontier[kk] = 0;
+        this._frontierCount--;
+        if(rec) this._deltaFrontierRemoved.push(kk);
+      }
+    }
+    for(var fj=0; fj<newKeys.length; fj++){
+      var kk = newKeys[fj];
+      if(!oldSet[kk] && !this.frontier[kk]){
+        this.frontier[kk] = 1;
+        this._frontierCount++;
+        if(rec) this._deltaFrontier.push(kk);
+      }
+    }
+    this._frontierKeys = newKeys;
 
     var novelAfter = this._visitedCount;
     if(novelAfter > novelBefore){
@@ -816,7 +871,7 @@ LSB.prototype.step = function(budget){
 LSB.prototype.stepBranch = function(b, next){
   var W = this.W, H = this.H, N = this.N;
   if(b.k === this.goalK){ this.done = true; this.path = b.path; return; }
-  this.expanded[b.k] = 1;
+  if(!this.expanded[b.k]){ this.expanded[b.k] = 1; this._expandedCount++; }
 
   var x0 = b.cell[0], y0 = b.cell[1];
   var grid = this.grid;
@@ -836,7 +891,7 @@ LSB.prototype.stepBranch = function(b, next){
     if(openCount[kk] <= 1){
       this.scar[kk] += 1.0;
       this.scarKeys[kk] = 1;
-      this.dead[kk] = 1;
+      this._markDead(kk);
       this.earlyDeaths++;
       continue;
     }
@@ -959,7 +1014,7 @@ LSB.prototype.backtrack = function(b, next){
     var k2 = c2[1]*W + c2[0];
     this.scar[k2] += 0.5;
     this.scarKeys[k2] = 1;
-    this.dead[k2] = 1;
+    this._markDead(k2);
   }
   this.kills++;
   return true;
@@ -967,20 +1022,27 @@ LSB.prototype.backtrack = function(b, next){
 
 // =============== stats ===============
 function getStats(algo, isLSB){
-  var validPath = algo.path
-    ? validatePath(algo.grid, algo.path, algo.start, algo.goal, algo.W, algo.H)
-    : { ok:false, reason:'no path' };
+  var validPath;
+  if(!algo.path){
+    validPath = { ok:false, reason:'no path' };
+  } else if(algo._pathValid !== undefined){
+    validPath = { ok:algo._pathValid, reason:algo._pathReason };
+  } else {
+    validPath = validatePath(algo.grid, algo.path, algo.start, algo.goal, algo.W, algo.H);
+    algo._pathValid = validPath.ok;
+    algo._pathReason = validPath.reason;
+  }
   return {
-    expanded: countKeys(algo.expanded),
-    generated: countKeys(algo.generated),
-    uniqueVisited: countKeys(algo.visited),
+    expanded: algo._expandedCount,
+    generated: algo._generatedCount,
+    uniqueVisited: algo._visitedCount,
     pathLen: algo.path ? algo.path.length : null,
     pathValid: validPath.ok,
     pathReason: validPath.reason,
     success: algo.done && validPath.ok,
     exhausted: !!algo.exhausted,
     done: algo.done,
-    frontier: countKeys(algo.frontier),
+    frontier: algo._frontierCount,
     backtracks: isLSB ? algo.backtracks : null,
     parks: isLSB ? algo.parks : null,
     resumes: isLSB ? algo.resumes : null,
@@ -1000,76 +1062,71 @@ function getStats(algo, isLSB){
   };
 }
 
-// =============== recording ===============
-function recordFrames(algo, isLSB){
-  var frames = [];
-  var prevVisited = {};
-  var prevFrontier = {};
-  var prevDead = {};
-
-  frames.push({
+// =============== recording (lockstep + timestamps) ===============
+function initFrame(algo, isLSB, t_ms){
+  return {
+    t_ms: t_ms,
     addVisited: keysOf(algo.visited),
     addFrontier: keysOf(algo.frontier),
     remFrontier: [],
-    addDead: algo.dead ? keysOf(algo.dead) : [],
+    addDead: isLSB ? keysOf(algo.dead) : [],
     path: algo.path ? algo.path.slice() : null,
     parked: isLSB && algo.parked ? algo.parked.map(function(b){ return b.k; }) : null,
     stats: getStats(algo, isLSB)
-  });
-  forEachKey(algo.visited, function(k){ prevVisited[k] = 1; });
-  forEachKey(algo.frontier, function(k){ prevFrontier[k] = 1; });
-  if(algo.dead) forEachKey(algo.dead, function(k){ prevDead[k] = 1; });
+  };
+}
 
-  var recorded = 1;
-  while(!algo.done && recorded < RECORD_MAX_FRAMES){
-    algo.step(RECORD_BUDGET);
-    var addVisited = [];
-    forEachKey(algo.visited, function(k){ if(!prevVisited[k]){ addVisited.push(k); prevVisited[k] = 1; } });
-    var addFrontier = [];
-    forEachKey(algo.frontier, function(k){ if(!prevFrontier[k]){ addFrontier.push(k); prevFrontier[k] = 1; } });
-    var remFrontier = [];
-    for(var k in prevFrontier) if(prevFrontier[k] && !algo.frontier[k]) remFrontier.push(parseInt(k, 10));
-    for(var ri=0; ri<remFrontier.length; ri++) delete prevFrontier[remFrontier[ri]];
-    var addDead = [];
-    if(algo.dead){
-      forEachKey(algo.dead, function(k){ if(!prevDead[k]){ addDead.push(k); prevDead[k] = 1; } });
-    }
-    frames.push({
-      addVisited: addVisited, addFrontier: addFrontier, remFrontier: remFrontier,
-      addDead: addDead,
-      path: algo.path ? algo.path.slice() : null,
-      parked: isLSB && algo.parked ? algo.parked.map(function(b){ return b.k; }) : null,
-      stats: getStats(algo, isLSB)
-    });
-    recorded++;
-  }
-  return frames;
+function makeFrame(algo, isLSB, t_ms){
+  var addVisited = algo._deltaVisited; algo._deltaVisited = [];
+  var addFrontier = algo._deltaFrontier; algo._deltaFrontier = [];
+  var remFrontier = algo._deltaFrontierRemoved; algo._deltaFrontierRemoved = [];
+  var addDead = algo._deltaDead; algo._deltaDead = [];
+  return {
+    t_ms: t_ms,
+    addVisited: addVisited,
+    addFrontier: addFrontier,
+    remFrontier: remFrontier,
+    addDead: addDead,
+    path: algo.path ? algo.path.slice() : null,
+    parked: isLSB && algo.parked ? algo.parked.map(function(b){ return b.k; }) : null,
+    stats: getStats(algo, isLSB)
+  };
 }
 
 function buildRecording(){
   var a = new AStar(grid, START, GOAL);
   var l = new LSB(grid, START, GOAL);
-  var framesA = recordFrames(a, false);
-  var framesL = recordFrames(l, true);
-  var ticks = Math.max(framesA.length, framesL.length);
-  var idleA = framesA[framesA.length-1];
-  while(framesA.length < ticks)
-    framesA.push({ addVisited:[], addFrontier:[], remFrontier:[], addDead:[],
-                   path: idleA.path, parked: idleA.parked, stats: idleA.stats });
-  var idleL = framesL[framesL.length-1];
-  while(framesL.length < ticks)
-    framesL.push({ addVisited:[], addFrontier:[], remFrontier:[], addDead:[],
-                   path: idleL.path, parked: idleL.parked, stats: idleL.stats });
-  return { framesA: framesA, framesL: framesL, ticks: ticks, grid: grid, START: START, GOAL: GOAL, W: W, H: H };
+  a._recording = true; l._recording = true;
+
+  var framesA = [ initFrame(a, false, 0) ];
+  var framesL = [ initFrame(l, true, 0) ];
+
+  while((!a.done || !l.done) && framesA.length < RECORD_MAX_FRAMES){
+    if(!a.done) a.step(RECORD_BUDGET);
+    if(!l.done) l.step(RECORD_BUDGET);
+    var t_ms = Math.max(a.algMs, l.algMs);
+    framesA.push(makeFrame(a, false, t_ms));
+    framesL.push(makeFrame(l, true, t_ms));
+  }
+
+  a._recording = false; l._recording = false;
+
+  return {
+    framesA: framesA,
+    framesL: framesL,
+    ticks: framesA.length,
+    totalMs: Math.max(a.algMs, l.algMs),
+    grid: grid, START: START, GOAL: GOAL, W: W, H: H
+  };
 }
 
 // =============== playback ===============
 var recording = null;
 var playbackIdx = -1;
+var playbackMs = 0;
 var paused = false;
 var finished = false;
 var lastFrameTime = 0;
-var tickAccumulator = 0;
 
 var playbackA = { visited:{}, frontier:{}, dead:{} };
 var playbackL = { visited:{}, frontier:{}, dead:{} };
@@ -1082,9 +1139,11 @@ function applyFrame(state, frame){
   for(var k=0; k<frame.remFrontier.length; k++) delete state.frontier[frame.remFrontier[k]];
   for(var m=0; m<frame.addDead.length; m++) state.dead[frame.addDead[m]] = true;
 }
-function advanceToFrame(target){
-  if(target <= playbackIdx) return;
-  while(playbackIdx < target){
+
+// Advance to the latest frame whose t_ms <= target_ms (monotonic).
+function advanceToTime(target_ms){
+  var lastIdx = recording.ticks - 1;
+  while(playbackIdx < lastIdx && recording.framesA[playbackIdx + 1].t_ms <= target_ms){
     playbackIdx++;
     var fa = recording.framesA[playbackIdx];
     var fl = recording.framesL[playbackIdx];
@@ -1094,13 +1153,15 @@ function advanceToFrame(target){
     currentL.path = fl.path; currentL.parked = fl.parked; currentL.stats = fl.stats;
   }
 }
+
 function resetPlayback(){
-  playbackIdx = -1; tickAccumulator = 0;
+  playbackIdx = -1;
+  playbackMs = 0;
   playbackA = { visited:{}, frontier:{}, dead:{} };
   playbackL = { visited:{}, frontier:{}, dead:{} };
   currentA = { path:null, parked:null, stats:null };
   currentL = { path:null, parked:null, stats:null };
-  advanceToFrame(0);
+  advanceToTime(0);
 }
 
 // =============== rendering ===============
@@ -1167,20 +1228,22 @@ function renderCurrent(){
   var showL = finished ? recording.framesL[recording.framesL.length - 1].stats : currentL.stats;
   document.getElementById('sA').innerHTML = fmtStats(showA);
   document.getElementById('sL').innerHTML = fmtStats(showL);
-  if(recording && recording.computeMs !== undefined){
-    var meta = 'frame ' + playbackIdx + ' / ' + (recording.ticks - 1) +
-               '  |  wall clock (record): <b>' + fmtTime(recording.computeMs) + '</b>';
+  if(recording){
+    var total = recording.totalMs;
+    var meta = 't = ' + fmtTime(playbackMs) + ' / ' + fmtTime(total) +
+               '   frame ' + (playbackIdx < 0 ? 0 : playbackIdx) + ' / ' + (recording.ticks - 1) +
+               '   wall clock (record): <b>' + fmtTime(recording.computeMs || 0) + '</b>';
     document.getElementById('metaA').innerHTML = meta;
     document.getElementById('metaL').innerHTML = meta;
   }
 }
 
-function setSpeed(s){
-  PLAYBACK_SPEED = s;
+function setNsPerFrame(ns){
+  NS_PER_FRAME = ns;
   var btns = document.querySelectorAll('.speed-btn');
   for(var i=0; i<btns.length; i++){
-    var v = parseFloat(btns[i].getAttribute('data-sp'));
-    btns[i].className = (Math.abs(v - s) < 1e-6) ? 'speed-btn speed-on' : 'speed-btn';
+    var v = parseFloat(btns[i].getAttribute('data-ns'));
+    btns[i].className = (v === ns) ? 'speed-btn speed-on' : 'speed-btn';
   }
 }
 
@@ -1229,8 +1292,8 @@ function buildAndPlay(){
     recording = buildRecording();
     var computeMs = performance.now() - t0;
     recording.computeMs = computeMs;
-    banner.textContent = 'Recorded ' + recording.ticks + ' frames in ' + fmtTime(computeMs) +
-                         ' (A*: ' + recording.framesA.length + ', LSB: ' + recording.framesL.length + ')';
+    banner.textContent = 'Recorded ' + recording.ticks + ' frames, alg time ' +
+                         fmtTime(recording.totalMs) + ' in wall ' + fmtTime(computeMs);
     setTimeout(function(){ banner.style.display = 'none'; }, 2500);
     resetPlayback();
     paused = false; finished = false; lastFrameTime = 0;
@@ -1250,25 +1313,31 @@ function loop(now){
   if(paused || finished || !recording) return;
   if(now - lastFrameTime < TICK_DELAY) return;
   lastFrameTime = now;
-  var lastIdx = recording.ticks - 1;
-  if(PLAYBACK_SPEED >= 9999){
-    advanceToFrame(lastIdx);
-    finished = true; renderCurrent();
+
+  var total = recording.totalMs;
+
+  if(NS_PER_FRAME >= 1e8){
+    playbackMs = total;
+    advanceToTime(playbackMs);
+    finished = true;
+    renderCurrent();
     document.getElementById('pauseBtn').innerText = 'Done';
     return;
   }
-  tickAccumulator += PLAYBACK_SPEED;
-  var advanceBy = Math.floor(tickAccumulator);
-  if(advanceBy <= 0){ renderCurrent(); return; }
-  tickAccumulator -= advanceBy;
-  var target = playbackIdx + advanceBy;
-  if(target >= lastIdx){
-    advanceToFrame(lastIdx);
-    finished = true; renderCurrent();
+
+  // advance alg-time clock by NS_PER_FRAME each animation frame
+  playbackMs += NS_PER_FRAME / 1e6;
+
+  if(playbackMs >= total){
+    playbackMs = total;
+    advanceToTime(playbackMs);
+    finished = true;
+    renderCurrent();
     document.getElementById('pauseBtn').innerText = 'Done';
     return;
   }
-  advanceToFrame(target);
+
+  advanceToTime(playbackMs);
   renderCurrent();
 }
 
@@ -1283,7 +1352,7 @@ function runOneOnce(factory, isLSB){
   var iters = 0;
   while(!algo.done && iters < 60000){ algo.step(MASS_BUDGET); iters++; }
   var s = getStats(algo, isLSB);
-  return { stats: s, algMs: algo.algMs, backtracks: s.backtracks, parks: s.parks, resumes: s.resumes, kills: s.kills, earlyDeaths: s.earlyDeaths, cutsMade: s.cutsMade, cutCellsPruned: s.cutCellsPruned, cutKilledBranches: s.cutKilledBranches, cutChecksRun: s.cutChecksRun, cutGateSkips: s.cutGateSkips, archived: s.archived, revived: s.revived, archiveSize: s.archiveSize };
+  return { stats: s, algMs: algo.algMs };
 }
 function runBench(factory, isLSB){
   var totalMs = 0, reps = 0, last = null;
@@ -1293,12 +1362,7 @@ function runBench(factory, isLSB){
     if(totalMs >= MASS_MIN_TIME_MS) break;
   }
   return {
-    stats: last.stats, backtracks: last.backtracks, parks: last.parks,
-    resumes: last.resumes, kills: last.kills, earlyDeaths: last.earlyDeaths,
-    cutsMade: last.cutsMade, cutCellsPruned: last.cutCellsPruned,
-    cutKilledBranches: last.cutKilledBranches, cutChecksRun: last.cutChecksRun,
-    cutGateSkips: last.cutGateSkips,
-    archived: last.archived, revived: last.revived, archiveSize: last.archiveSize,
+    stats: last.stats,
     avgMs: totalMs / reps, reps: reps
   };
 }
@@ -1343,16 +1407,16 @@ function massTest(reuse){
         acc.aTime += ra.avgMs; acc.lTime += rl.avgMs;
         acc.aExp += ra.stats.expanded; acc.lExp += rl.stats.expanded;
         acc.aPath += ra.stats.pathLen || 0; acc.lPath += rl.stats.pathLen || 0;
-        acc.lBT += rl.backtracks || 0; acc.lParks += rl.parks || 0;
-        acc.lRes += rl.resumes || 0; acc.lKills += rl.kills || 0;
-        acc.lED += rl.earlyDeaths || 0;
-        acc.lCuts += rl.cutsMade || 0;
-        acc.lPruned += rl.cutCellsPruned || 0;
-        acc.lCutKill += rl.cutKilledBranches || 0;
-        acc.lChecks += rl.cutChecksRun || 0;
-        acc.lGate += rl.cutGateSkips || 0;
-        acc.lArch += rl.archived || 0;
-        acc.lReviv += rl.revived || 0;
+        acc.lBT += rl.stats.backtracks || 0; acc.lParks += rl.stats.parks || 0;
+        acc.lRes += rl.stats.resumes || 0; acc.lKills += rl.stats.kills || 0;
+        acc.lED += rl.stats.earlyDeaths || 0;
+        acc.lCuts += rl.stats.cutsMade || 0;
+        acc.lPruned += rl.stats.cutCellsPruned || 0;
+        acc.lCutKill += rl.stats.cutKilledBranches || 0;
+        acc.lChecks += rl.stats.cutChecksRun || 0;
+        acc.lGate += rl.stats.cutGateSkips || 0;
+        acc.lArch += rl.stats.archived || 0;
+        acc.lReviv += rl.stats.revived || 0;
         acc.n++;
       }
       rows.push({
@@ -1362,10 +1426,10 @@ function massTest(reuse){
         aExp: ra.stats.expanded, lExp: rl.stats.expanded,
         aPath: ra.stats.pathLen, lPath: rl.stats.pathLen,
         aSuccess: aOk, lSuccess: lOk, lReason: rl.stats.pathReason,
-        lBT: rl.backtracks, lParks: rl.parks, lRes: rl.resumes, lKills: rl.kills,
-        lED: rl.earlyDeaths, lCuts: rl.cutsMade, lPruned: rl.cutCellsPruned,
-        lCutKill: rl.cutKilledBranches, lChecks: rl.cutChecksRun, lGate: rl.cutGateSkips,
-        lArch: rl.archived, lReviv: rl.revived,
+        lBT: rl.stats.backtracks, lParks: rl.stats.parks, lRes: rl.stats.resumes, lKills: rl.stats.kills,
+        lED: rl.stats.earlyDeaths, lCuts: rl.stats.cutsMade, lPruned: rl.stats.cutCellsPruned,
+        lCutKill: rl.stats.cutKilledBranches, lChecks: rl.stats.cutChecksRun, lGate: rl.stats.cutGateSkips,
+        lArch: rl.stats.archived, lReviv: rl.stats.revived,
         verdict: verdict
       });
     }
@@ -1454,7 +1518,7 @@ function massTest(reuse){
   }, 30);
 }
 
-setSpeed(1);
+setNsPerFrame(10000);
 setSize(100, 50);
 requestAnimationFrame(loop);
 </script>
