@@ -527,6 +527,7 @@ function LSB(g, start, goal){
   this.cutKilledBranches = 0;
   this.cutChecksRun = 0;
   this.cutGateSkips = 0;
+  this.skippedVisited = 0;
 
   this.layerMedian = 0;
   this.parkedFull = false;
@@ -828,6 +829,7 @@ LSB.prototype.stepBranch = function(b, next){
   var grid = this.grid;
   var openCount = this.openCount;
   var pathSet = b.pathSet;
+  var visited = this.visited;
   var opts = [];
   for(var i=0; i<4; i++){
     var nx = x0 + N4[i][0];
@@ -838,6 +840,8 @@ LSB.prototype.stepBranch = function(b, next){
     if(pathSet[kk]) continue;
     if(kk === this.goalK){ opts.push([nx, ny, kk]); continue; }
     if(this.dead[kk]) continue;
+    // FIX 1: don't step into any cell that any branch already visited
+    if(visited[kk]){ this.skippedVisited++; continue; }
     if(openCount[kk] <= 1){
       this.scar[kk] += 1.0;
       this.scarKeys[kk] = 1;
@@ -913,6 +917,8 @@ LSB.prototype.backtrack = function(b, next){
       var nt = top.options[top.nextIdx];
       top.nextIdx++;
       if(this.dead[nt[2]] && nt[2] !== this.goalK) continue;
+      // FIX 2: skip options that were already visited by some other branch
+      if(this.visited[nt[2]] && nt[2] !== this.goalK){ this.skippedVisited++; continue; }
       for(var i = b.path.length - 1; i > top.pathIdx; i--){
         var c = b.path[i];
         b.pathSet[c[1]*W + c[0]] = 0;
@@ -978,6 +984,7 @@ function getStats(algo, isLSB){
     revived: isLSB ? algo.revived : null,
     archiveSize: isLSB ? algo.archive.length : null,
     parkedCount: isLSB ? algo.parked.length : null,
+    skippedVisited: isLSB ? algo.skippedVisited : null,
     algMs: algo.algMs,
     isLSB: isLSB
   };
@@ -1123,7 +1130,7 @@ function fmtStats(stats){
   s += '<br>frontier: <b>' + stats.frontier + '</b><br>';
   if(stats.isLSB){
     s += 'bt: <b>' + stats.backtracks + '</b>  parks: <b>' + stats.parks + '</b>  res: <b>' + stats.resumes + '</b><br>';
-    s += 'kills: <b>' + stats.kills + '</b>  parked: <b>' + stats.parkedCount + '</b><br>';
+    s += 'kills: <b>' + stats.kills + '</b>  parked: <b>' + stats.parkedCount + '</b>  skippedVis: <b>' + stats.skippedVisited + '</b><br>';
     s += 'early dead: <b>' + stats.earlyDeaths + '</b><br>';
     s += 'archive: <b>' + stats.archiveSize + '</b>  archived: <b>' + stats.archived + '</b>  revived: <b>' + stats.revived + '</b><br>';
     s += 'cuts: <b>' + stats.cutsMade + '</b>  checks: <b>' + stats.cutChecksRun + '</b>  gate-skips: <b>' + stats.cutGateSkips + '</b>  pruned: <b>' + stats.cutCellsPruned + '</b><br>';
@@ -1289,7 +1296,7 @@ function massTest(reuse){
     }
     var rows = [];
     var aSuccess = 0, lSuccess = 0, aWins = 0, lWins = 0, ties = 0;
-    var acc = { aTime:0, lTime:0, aExp:0, lExp:0, aPath:0, lPath:0, lBT:0, lParks:0, lRes:0, lKills:0, lED:0, lCuts:0, lPruned:0, lCutKill:0, lChecks:0, lGate:0, lArch:0, lReviv:0, n:0 };
+    var acc = { aTime:0, lTime:0, aExp:0, lExp:0, aPath:0, lPath:0, lBT:0, lParks:0, lRes:0, lKills:0, lED:0, lCuts:0, lPruned:0, lCutKill:0, lChecks:0, lGate:0, lArch:0, lReviv:0, lSkip:0, n:0 };
     for(var pi=0; pi<plans.length; pi++){
       var plan = plans[pi];
       var g = plan.fn(plan.seed);
@@ -1320,6 +1327,7 @@ function massTest(reuse){
         acc.lGate += rl.stats.cutGateSkips || 0;
         acc.lArch += rl.stats.archived || 0;
         acc.lReviv += rl.stats.revived || 0;
+        acc.lSkip += rl.stats.skippedVisited || 0;
         acc.n++;
       }
       rows.push({
@@ -1332,7 +1340,7 @@ function massTest(reuse){
         lBT: rl.stats.backtracks, lParks: rl.stats.parks, lRes: rl.stats.resumes, lKills: rl.stats.kills,
         lED: rl.stats.earlyDeaths, lCuts: rl.stats.cutsMade, lPruned: rl.stats.cutCellsPruned,
         lCutKill: rl.stats.cutKilledBranches, lChecks: rl.stats.cutChecksRun, lGate: rl.stats.cutGateSkips,
-        lArch: rl.stats.archived, lReviv: rl.stats.revived,
+        lArch: rl.stats.archived, lReviv: rl.stats.revived, lSkip: rl.stats.skippedVisited,
         verdict: verdict
       });
     }
@@ -1344,10 +1352,10 @@ function massTest(reuse){
     txt += pad('type', 9) + padL('seed', 12) + padL('A*t', 10) + padL('LSBt', 10)
          + padL('A*exp', 8) + padL('LSBexp', 9) + padL('A*pth', 7) + padL('LSBpth', 8)
          + padL('ok', 4) + padL('rep', 7) + padL('LSBbt', 8) + padL('park', 6) + padL('res', 5) + padL('kill', 6)
-         + padL('eDead', 7) + padL('chk', 5) + padL('gate', 6) + padL('cuts', 6) + padL('prune', 7) + padL('cKill', 7)
-         + padL('arch', 6) + padL('rev', 5)
+         + padL('eDead', 7) + padL('chk', 5) + padL('cuts', 6) + padL('prune', 7) + padL('cKill', 7)
+         + padL('arch', 6) + padL('rev', 5) + padL('skipV', 6)
          + '  verdict\n';
-    txt += '------------------------------------------------------------------------------------------------------------------------------------------------------\n';
+    txt += '-------------------------------------------------------------------------------------------------------------------------------------------------------------\n';
     for(var ri=0; ri<rows.length; ri++){
       var r = rows[ri];
       txt += pad(r.type, 9) + padL(r.seed.toString(16), 12)
@@ -1360,16 +1368,16 @@ function massTest(reuse){
           + padL(r.lRes === null ? '-' : r.lRes, 5) + padL(r.lKills === null ? '-' : r.lKills, 6)
           + padL(r.lED === null ? '-' : r.lED, 7)
           + padL(r.lChecks === null ? '-' : r.lChecks, 5)
-          + padL(r.lGate === null ? '-' : r.lGate, 6)
           + padL(r.lCuts === null ? '-' : r.lCuts, 6)
           + padL(r.lPruned === null ? '-' : r.lPruned, 7)
           + padL(r.lCutKill === null ? '-' : r.lCutKill, 7)
           + padL(r.lArch === null ? '-' : r.lArch, 6)
           + padL(r.lReviv === null ? '-' : r.lReviv, 5)
+          + padL(r.lSkip === null ? '-' : r.lSkip, 6)
           + '  ' + r.verdict + '\n';
       if(!r.lSuccess && r.lReason && r.lReason !== 'no path') txt += '  LSB path invalid: ' + r.lReason + '\n';
     }
-    txt += '------------------------------------------------------------------------------------------------------------------------------------------------------\n';
+    txt += '-------------------------------------------------------------------------------------------------------------------------------------------------------------\n';
     if(acc.n > 0){
       txt += pad('AVG', 9) + padL('', 12)
           + padL(fmtTime(acc.aTime/acc.n), 10) + padL(fmtTime(acc.lTime/acc.n), 10)
@@ -1380,12 +1388,12 @@ function massTest(reuse){
           + padL(Math.round(acc.lRes/acc.n), 5) + padL(Math.round(acc.lKills/acc.n), 6)
           + padL(Math.round(acc.lED/acc.n), 7)
           + padL(Math.round(acc.lChecks/acc.n), 5)
-          + padL(Math.round(acc.lGate/acc.n), 6)
           + padL(Math.round(acc.lCuts/acc.n), 6)
           + padL(Math.round(acc.lPruned/acc.n), 7)
           + padL(Math.round(acc.lCutKill/acc.n), 7)
           + padL(Math.round(acc.lArch/acc.n), 6)
           + padL(Math.round(acc.lReviv/acc.n), 5)
+          + padL(Math.round(acc.lSkip/acc.n), 6)
           + '  (n=' + acc.n + ')\n';
     }
     txt += '\nSUCCESS  A*: ' + aSuccess + '/' + MASS_N + '   LSB: ' + lSuccess + '/' + MASS_N + '\n';
@@ -1397,24 +1405,25 @@ function massTest(reuse){
       for(var si=0; si<rows.length; si++)
         if(rows[si].type === t2.name && rows[si].aSuccess && rows[si].lSuccess) sub.push(rows[si]);
       if(sub.length === 0){ txt += '  ' + pad(t2.name, 9) + '  (none)\n'; continue; }
-      var aAvgSum = 0, lAvgSum = 0, lBTSum = 0, lEDSum = 0, lCutsSum = 0, lPrunedSum = 0, lCutKillSum = 0, lChecksSum = 0, lArchSum = 0, lRevivSum = 0;
+      var aAvgSum = 0, lAvgSum = 0, lBTSum = 0, lEDSum = 0, lCutsSum = 0, lPrunedSum = 0, lCutKillSum = 0, lChecksSum = 0, lArchSum = 0, lRevivSum = 0, lSkipSum = 0;
       for(var xi=0; xi<sub.length; xi++){
         aAvgSum += sub[xi].aExp; lAvgSum += sub[xi].lExp;
         lBTSum += sub[xi].lBT || 0; lEDSum += sub[xi].lED || 0;
         lCutsSum += sub[xi].lCuts || 0; lPrunedSum += sub[xi].lPruned || 0;
         lCutKillSum += sub[xi].lCutKill || 0; lChecksSum += sub[xi].lChecks || 0;
         lArchSum += sub[xi].lArch || 0; lRevivSum += sub[xi].lReviv || 0;
+        lSkipSum += sub[xi].lSkip || 0;
       }
       txt += '  ' + pad(t2.name, 9) + '  A* exp ' + padL(Math.round(aAvgSum/sub.length), 7)
            + '   LSB exp ' + padL(Math.round(lAvgSum/sub.length), 7)
            + '   bt ' + padL(Math.round(lBTSum/sub.length), 6)
            + '   eDead ' + padL(Math.round(lEDSum/sub.length), 6)
-           + '   chk ' + padL(Math.round(lChecksSum/sub.length), 4)
            + '   cuts ' + padL(Math.round(lCutsSum/sub.length), 5)
            + '   pruned ' + padL(Math.round(lPrunedSum/sub.length), 6)
            + '   cKill ' + padL(Math.round(lCutKillSum/sub.length), 6)
            + '   arch ' + padL(Math.round(lArchSum/sub.length), 5)
            + '   rev ' + padL(Math.round(lRevivSum/sub.length), 4)
+           + '   skipV ' + padL(Math.round(lSkipSum/sub.length), 6)
            + '   n=' + sub.length + '\n';
     }
     out.textContent = txt;
