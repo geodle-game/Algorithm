@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LSB vs A*</title>
+<title>LSB vs A* vs DFS</title>
 <style>
   body { background:#111; color:#eee; font-family: monospace; margin:0; padding:12px; }
   h2 { margin: 4px 0; font-size: 15px; }
@@ -15,11 +15,12 @@
   .stats b { color:#fff; }
   .mem { color:#8fb; }
   .meta { font-size:11px; color:#888; margin-top:6px; border-top:1px solid #333; padding-top:6px; }
-  button { background:#2a2a2a; color:#eee; border:1px solid #444; padding:8px 12px;
+  button, select { background:#2a2a2a; color:#eee; border:1px solid #444; padding:8px 12px;
            border-radius:5px; font-family:monospace; font-size:13px; margin:3px; }
   button:active { background:#444; }
   button.speed-on { background:#3a5a3a; border-color:#7a7a7a; }
   button.size-on { background:#5a3a3a; border-color:#a77; }
+  select { padding: 6px 8px; }
   pre#results { background:#0a0a0a; padding:10px; border-radius:6px; font-size:11px;
                 line-height:1.4; overflow-x:auto; color:#ddd; margin-top:10px;
                 border:1px solid #333; white-space:pre; }
@@ -56,6 +57,17 @@
 </div>
 
 <div class="panel" style="margin-bottom:8px;">
+  <span style="color:#888;font-size:12px;margin-right:6px;">Left:</span>
+  <select id="leftSel" onchange="changeAlgo('left', this.value)">
+    <option>A*</option><option>LSB</option><option>DFS</option>
+  </select>
+  <span style="color:#888;font-size:12px;margin:0 8px 0 16px;">Right:</span>
+  <select id="rightSel" onchange="changeAlgo('right', this.value)">
+    <option>A*</option><option selected>LSB</option><option>DFS</option>
+  </select>
+</div>
+
+<div class="panel" style="margin-bottom:8px;">
   <button style="background:#333;border-color:#666" onclick="massTest(false, 12)">Mass test (12)</button>
   <button style="background:#333;border-color:#666" onclick="massTest(true, 12)">Reuse last (12)</button>
   <button style="background:#333;border-color:#666" onclick="massTest(false, 50)">Mass test (50)</button>
@@ -77,13 +89,13 @@
 
 <div class="row">
   <div class="col panel">
-    <h2>A*</h2>
+    <h2 id="hLeft">A*</h2>
     <canvas id="cA"></canvas>
     <div class="stats" id="sA"></div>
     <div class="meta" id="metaA"></div>
   </div>
   <div class="col panel">
-    <h2>LSB</h2>
+    <h2 id="hRight">LSB</h2>
     <canvas id="cL"></canvas>
     <div class="stats" id="sL"></div>
     <div class="meta" id="metaL"></div>
@@ -98,17 +110,21 @@ var CELL = 5;
 var RECORD_BUDGET = 1;
 var RECORD_MAX_FRAMES = 40000;
 var MASS_BUDGET = 8;
-var MASS_MAX_ITERS = 200000;
+var MASS_MAX_ITERS = 100000;
+var MASS_MIN_TIME_MS = 5;
+var MASS_MAX_REPS = 20;
 var TICK_DELAY = 16;
 var PLAYBACK_SPEED = 1;
 
 var CUT_CHECK_INTERVAL = 500;
 var CUT_MIN_VISITED_DELTA = 100;
 var FORK_COOLDOWN = 4;
-
 var REVIVE_DEADEND_THRESHOLD = 150;
 var REVIVE_BATCH = 6;
 var MAX_ARCHIVE = 500;
+
+var LEFT_ALGO = 'A*';
+var RIGHT_ALGO = 'LSB';
 
 var START = [0, 0];
 var GOAL = [W-1, H-1];
@@ -244,12 +260,19 @@ var N4 = [[1,0],[-1,0],[0,1],[0,-1]];
 
 function keysOf(obj){
   var out = [];
+  if(!obj) return out;
   if(obj.length !== undefined){
     for(var i=0; i<obj.length; i++) if(obj[i]) out.push(i);
   } else {
     for(var k in obj) if(obj[k]) out.push(parseInt(k, 10));
   }
   return out;
+}
+function countObjEntries(o){
+  if(!o) return 0;
+  var n = 0;
+  for(var k in o) if(o[k]) n++;
+  return n;
 }
 
 function validatePath(g, path, start, goal, W, H){
@@ -279,6 +302,11 @@ function fmtBytes(b){
   if(b < 1024) return b + ' B';
   if(b < 1024*1024) return (b/1024).toFixed(1) + ' KB';
   return (b/1024/1024).toFixed(2) + ' MB';
+}
+function fmtBytesShort(b){
+  if(b < 1024) return b + 'B';
+  if(b < 1024*1024) return (b/1024).toFixed(0) + 'K';
+  return (b/1024/1024).toFixed(1) + 'M';
 }
 
 function MinHeap(){ this.h = []; }
@@ -311,67 +339,9 @@ MinHeap.prototype.pop = function(){
 };
 Object.defineProperty(MinHeap.prototype, 'size', { get: function(){ return this.h.length; } });
 
-// =============== memory estimation ===============
-// Rough per-object costs. Numbers are JS engine dependent; they're here to
-// compare A* vs LSB, not to give byte-exact numbers.
-var BYTES_OBJ_HEADER = 48;         // any object
-var BYTES_SMALL_ARRAY = 32;        // empty array
-var BYTES_PER_NUMBER = 8;          // Number in a dense array
-var BYTES_PER_SMALL_ARRAY = 48;    // [x,y] pair
-var BYTES_OBJECT_MAP_ENTRY = 72;   // string-keyed map entry (conservative)
-var BYTES_STACK_FRAME = 64;        // {cell, k, options, nextIdx, pathIdx}
-
-function estimateBranchBytes(b){
-  var bytes = BYTES_OBJ_HEADER;
-  bytes += BYTES_SMALL_ARRAY + b.path.length * BYTES_PER_SMALL_ARRAY;
-  bytes += BYTES_SMALL_ARRAY;
-  for(var i=0; i<b.stack.length; i++){
-    var s = b.stack[i];
-    bytes += BYTES_STACK_FRAME;
-    bytes += BYTES_SMALL_ARRAY + s.options.length * BYTES_PER_SMALL_ARRAY;
-  }
-  return bytes;
-}
-function estimateAStarBytes(a){
-  var bytes = 0;
-  bytes += a.open.h.length * (BYTES_SMALL_ARRAY + 3 * BYTES_PER_NUMBER + BYTES_PER_SMALL_ARRAY);
-  bytes += countObjEntries(a.gMap) * BYTES_OBJECT_MAP_ENTRY;
-  bytes += countObjEntries(a.came) * BYTES_OBJECT_MAP_ENTRY;
-  bytes += countObjEntries(a.closed) * BYTES_OBJECT_MAP_ENTRY;
-  bytes += countObjEntries(a.visited) * BYTES_OBJECT_MAP_ENTRY;
-  bytes += countObjEntries(a.generated) * BYTES_OBJECT_MAP_ENTRY;
-  bytes += countObjEntries(a.expanded) * BYTES_OBJECT_MAP_ENTRY;
-  bytes += countObjEntries(a.frontier) * BYTES_OBJECT_MAP_ENTRY;
-  return bytes;
-}
-function countObjEntries(o){
-  var n = 0;
-  for(var k in o) if(o[k]) n++;
-  return n;
-}
-function estimateLSBBytes(l){
-  var bytes = 0;
-  // Typed arrays (exact)
-  bytes += l.visited.byteLength;
-  bytes += l.generated.byteLength;
-  bytes += l.expanded.byteLength;
-  bytes += l.dead.byteLength;
-  bytes += l.blocked.byteLength;
-  bytes += l.cutDead.byteLength;
-  bytes += l.frontier.byteLength;
-  bytes += l.scar.byteLength;
-  bytes += l.dtg.byteLength;
-  bytes += l.openCount.byteLength;
-  // Live branches
-  var bi;
-  for(bi=0; bi<l.branches.length; bi++) bytes += estimateBranchBytes(l.branches[bi]);
-  for(bi=0; bi<l.parked.length; bi++) bytes += estimateBranchBytes(l.parked[bi]);
-  for(bi=0; bi<l.archive.length; bi++) bytes += estimateBranchBytes(l.archive[bi]);
-  return bytes;
-}
-
 // =============== A* ===============
 function AStar(g, start, goal){
+  this.kind = 'astar';
   this.grid = g; this.start = start; this.goal = goal;
   this.W = g[0].length; this.H = g.length;
   var W = this.W;
@@ -385,17 +355,10 @@ function AStar(g, start, goal){
   this.visited = {}; this.generated = {}; this.expanded = {}; this.frontier = {};
   this.visited[k0] = true; this.generated[k0] = true; this.frontier[k0] = true;
   this.done = false; this.exhausted = false; this.path = null; this.algMs = 0;
-  this._visitedCount = 1;
-  this._generatedCount = 1;
-  this._expandedCount = 0;
-  this._frontierCount = 1;
+  this._visitedCount = 1; this._generatedCount = 1; this._expandedCount = 0; this._frontierCount = 1;
   this._recording = false;
-  this._deltaVisited = [];
-  this._deltaFrontier = [];
-  this._deltaFrontierRemoved = [];
-  this._deltaDead = [];
-  this._pathValid = undefined;
-  this._pathReason = undefined;
+  this._deltaVisited = []; this._deltaFrontier = []; this._deltaFrontierRemoved = []; this._deltaDead = [];
+  this._pathValid = undefined; this._pathReason = undefined;
 }
 AStar.prototype.step = function(budget){
   var t0 = performance.now();
@@ -411,20 +374,14 @@ AStar.prototype.step = function(budget){
     this.visited[kc] = true;
     this.expanded[kc] = true;
     this._expandedCount++;
-    if(this.frontier[kc]){
-      delete this.frontier[kc];
-      this._frontierCount--;
-      if(rec) this._deltaFrontierRemoved.push(kc);
-    }
+    if(this.frontier[kc]){ delete this.frontier[kc]; this._frontierCount--; if(rec) this._deltaFrontierRemoved.push(kc); }
     spent++;
     if(c[0] === this.goal[0] && c[1] === this.goal[1]){ this.done = true; this._recon(c); break; }
     for(var i=0; i<N4.length; i++){
-      var nx = c[0] + N4[i][0];
-      var ny = c[1] + N4[i][1];
+      var nx = c[0] + N4[i][0], ny = c[1] + N4[i][1];
       if(nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
       if(g[ny][nx] !== 0) continue;
-      var ng = gcost + 1;
-      var kn = ny * W + nx;
+      var ng = gcost + 1, kn = ny * W + nx;
       if(this.closed[kn]) continue;
       var cur = this.gMap[kn];
       if(cur === undefined || ng < cur){
@@ -445,6 +402,61 @@ AStar.prototype._recon = function(end){
   p.reverse(); this.path = p;
 };
 
+// =============== DFS ===============
+function DFS(g, start, goal){
+  this.kind = 'dfs';
+  this.grid = g; this.start = start; this.goal = goal;
+  this.W = g[0].length; this.H = g.length;
+  var W = this.W;
+  var k0 = start[1]*W + start[0];
+  this.k0 = k0;
+  this.stack = [start];
+  this.came = {};
+  this.visited = {}; this.generated = {}; this.expanded = {}; this.frontier = {};
+  this.visited[k0] = true; this.generated[k0] = true; this.frontier[k0] = true;
+  this.done = false; this.exhausted = false; this.path = null; this.algMs = 0;
+  this._visitedCount = 1; this._generatedCount = 1; this._expandedCount = 0; this._frontierCount = 1;
+  this._recording = false;
+  this._deltaVisited = []; this._deltaFrontier = []; this._deltaFrontierRemoved = []; this._deltaDead = [];
+  this._pathValid = undefined; this._pathReason = undefined;
+}
+DFS.prototype.step = function(budget){
+  var t0 = performance.now();
+  var spent = 0;
+  var g = this.grid, W = this.W, H = this.H;
+  var rec = this._recording;
+  var goal = this.goal;
+  while(spent < budget && !this.done){
+    if(this.stack.length === 0){ this.done = true; this.exhausted = true; break; }
+    var c = this.stack.pop();
+    var kc = c[1]*W + c[0];
+    this.expanded[kc] = true;
+    this._expandedCount++;
+    if(this.frontier[kc]){ delete this.frontier[kc]; this._frontierCount--; if(rec) this._deltaFrontierRemoved.push(kc); }
+    spent++;
+    if(c[0] === goal[0] && c[1] === goal[1]){ this.done = true; this._recon(c); break; }
+    for(var i=N4.length-1; i>=0; i--){
+      var nx = c[0] + N4[i][0], ny = c[1] + N4[i][1];
+      if(nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+      if(g[ny][nx] !== 0) continue;
+      var kn = ny * W + nx;
+      if(this.visited[kn]) continue;
+      this.visited[kn] = true; this._visitedCount++;
+      this.generated[kn] = true; this._generatedCount++;
+      this.came[kn] = c;
+      this.frontier[kn] = true; this._frontierCount++;
+      this.stack.push([nx, ny]);
+      if(rec){ this._deltaVisited.push(kn); this._deltaFrontier.push(kn); }
+    }
+  }
+  this.algMs += performance.now() - t0;
+};
+DFS.prototype._recon = function(end){
+  var p = []; var c = end; var W = this.W;
+  while(c){ p.push(c); c = this.came[c[1]*W + c[0]]; }
+  p.reverse(); this.path = p;
+};
+
 // =============== LSB ===============
 function Branch(cell, path, cameFrom, W){
   this.cell = cell;
@@ -460,37 +472,25 @@ function Branch(cell, path, cameFrom, W){
 }
 Branch.prototype.clone = function(){
   var b = new Branch(this.cell, this.path, this.cameFrom, this.W || 0);
-  b.k = this.k;
-  b.scoreCache = this.scoreCache;
-  b.depth = this.depth;
-  b.lastForkDepth = this.lastForkDepth;
+  b.k = this.k; b.scoreCache = this.scoreCache; b.depth = this.depth; b.lastForkDepth = this.lastForkDepth;
   for(var i=0; i<this.stack.length; i++){
     var s = this.stack[i];
-    b.stack.push({
-      cell: s.cell, k: s.k,
-      options: s.options.slice(),
-      nextIdx: s.nextIdx,
-      pathIdx: s.pathIdx
-    });
+    b.stack.push({ cell: s.cell, k: s.k, options: s.options.slice(), nextIdx: s.nextIdx, pathIdx: s.pathIdx });
   }
   return b;
 };
 
 function LSB(g, start, goal){
+  this.kind = 'lsb';
   this.grid = g; this.start = start; this.goal = goal;
   this.W = g[0].length; this.H = g.length;
   var W = this.W, H = this.H;
   var N = W * H;
   this.N = N;
-
   var scale = Math.max(1, Math.floor((W*H) / 3000));
-  this.max_branches      = 16 * scale;
-  this.max_parked        = 100 * scale;
-  this.scar_threshold    = 2.5;
-  this.scar_decay        = 0.004;
-  this.tryEps            = 0.5;
-  this.minActive         = 4 * scale;
-  this.stallThreshold    = 200 * scale;
+  this.max_branches = 16 * scale; this.max_parked = 100 * scale;
+  this.scar_threshold = 2.5; this.scar_decay = 0.004; this.tryEps = 0.5;
+  this.minActive = 4 * scale; this.stallThreshold = 200 * scale;
 
   var dtg = new Float32Array(N);
   var gx = goal[0], gy = goal[1];
@@ -517,43 +517,26 @@ function LSB(g, start, goal){
   this.openCount = openCount;
 
   var openMinX = W, openMaxX = -1, openMinY = H, openMaxY = -1;
-  for(var oy=0; oy<H; oy++){
-    for(var ox=0; ox<W; ox++){
-      if(g[oy][ox] === 0){
-        if(ox < openMinX) openMinX = ox;
-        if(ox > openMaxX) openMaxX = ox;
-        if(oy < openMinY) openMinY = oy;
-        if(oy > openMaxY) openMaxY = oy;
-      }
+  for(var oy=0; oy<H; oy++) for(var ox=0; ox<W; ox++){
+    if(g[oy][ox] === 0){
+      if(ox < openMinX) openMinX = ox; if(ox > openMaxX) openMaxX = ox;
+      if(oy < openMinY) openMinY = oy; if(oy > openMaxY) openMaxY = oy;
     }
   }
   this.openMinX = openMinX; this.openMaxX = openMaxX;
   this.openMinY = openMinY; this.openMaxY = openMaxY;
 
-  this.visited   = new Uint8Array(N);
-  this.generated = new Uint8Array(N);
-  this.expanded  = new Uint8Array(N);
-  this.dead      = new Uint8Array(N);
-  this.blocked   = new Uint8Array(N);
-  this.cutDead   = new Uint8Array(N);
-  this.frontier  = new Uint8Array(N);
-  this.scar      = new Float32Array(N);
-  this.scarKeys  = {};
+  this.visited = new Uint8Array(N); this.generated = new Uint8Array(N);
+  this.expanded = new Uint8Array(N); this.dead = new Uint8Array(N);
+  this.blocked = new Uint8Array(N); this.cutDead = new Uint8Array(N);
+  this.frontier = new Uint8Array(N); this.scar = new Float32Array(N);
+  this.scarKeys = {};
 
-  this._visitedCount = 0;
-  this._generatedCount = 0;
-  this._expandedCount = 0;
-  this._frontierCount = 0;
-  this._deadCount = 0;
-
+  this._visitedCount = 0; this._generatedCount = 0; this._expandedCount = 0;
+  this._frontierCount = 0; this._deadCount = 0;
   this._recording = false;
-  this._deltaVisited = [];
-  this._deltaFrontier = [];
-  this._deltaFrontierRemoved = [];
-  this._deltaDead = [];
-
-  this._pathValid = undefined;
-  this._pathReason = undefined;
+  this._deltaVisited = []; this._deltaFrontier = []; this._deltaFrontierRemoved = []; this._deltaDead = [];
+  this._pathValid = undefined; this._pathReason = undefined;
 
   this.vMinX = W; this.vMaxX = -1; this.vMinY = H; this.vMaxY = -1;
   this._frontierKeys = [];
@@ -572,28 +555,15 @@ function LSB(g, start, goal){
   this.frontier[b.k] = 1;
   this._frontierCount = 1;
 
-  this.parked = [];
-  this.archive = [];
+  this.parked = []; this.archive = [];
   this.done = false; this.exhausted = false; this.path = null;
   this.tick = 0; this.lastNovelTick = 0;
   this.backtracks = 0; this.parks = 0; this.resumes = 0; this.kills = 0;
-  this.earlyDeaths = 0;
-  this.deadEndStreak = 0;
-  this.archived = 0;
-  this.revived = 0;
-
-  this.cutCheckTick = 0;
-  this.lastCutCheckVisited = 0;
-  this.cutsMade = 0;
-  this.cutCellsPruned = 0;
-  this.cutKilledBranches = 0;
-  this.cutChecksRun = 0;
-  this.cutGateSkips = 0;
-  this.skippedBlocked = 0;
-
-  this.layerMedian = 0;
-  this.parkedFull = false;
-
+  this.earlyDeaths = 0; this.deadEndStreak = 0; this.archived = 0; this.revived = 0;
+  this.cutCheckTick = 0; this.lastCutCheckVisited = 0;
+  this.cutsMade = 0; this.cutCellsPruned = 0; this.cutKilledBranches = 0;
+  this.cutChecksRun = 0; this.cutGateSkips = 0; this.skippedBlocked = 0;
+  this.layerMedian = 0; this.parkedFull = false;
   this.algMs = 0;
 }
 
@@ -603,19 +573,14 @@ LSB.prototype._addGenerated = function(k){
     this.blocked[k] = 1;
     this.generated[k] = 1; this._generatedCount++;
     if(this._recording) this._deltaVisited.push(k);
-    var W = this.W;
-    var x = k % W, y = (k - x) / W;
-    if(x < this.vMinX) this.vMinX = x;
-    if(x > this.vMaxX) this.vMaxX = x;
-    if(y < this.vMinY) this.vMinY = y;
-    if(y > this.vMaxY) this.vMaxY = y;
+    var W = this.W; var x = k % W, y = (k - x) / W;
+    if(x < this.vMinX) this.vMinX = x; if(x > this.vMaxX) this.vMaxX = x;
+    if(y < this.vMinY) this.vMinY = y; if(y > this.vMaxY) this.vMaxY = y;
   }
 };
 LSB.prototype._markDead = function(k){
   if(!this.dead[k]){
-    this.dead[k] = 1;
-    this.blocked[k] = 1;
-    this._deadCount++;
+    this.dead[k] = 1; this.blocked[k] = 1; this._deadCount++;
     if(this._recording) this._deltaDead.push(k);
   }
 };
@@ -623,10 +588,8 @@ LSB.prototype._unpark = function(n){
   this.parked.sort(function(a,b){ return a.scoreCache - b.scoreCache; });
   var take = Math.min(n, this.parked.length);
   for(var j=0; j<take; j++){
-    var b = this.parked.shift();
-    b.parked = false;
-    this.branches.push(b);
-    this.resumes++;
+    var b = this.parked.shift(); b.parked = false;
+    this.branches.push(b); this.resumes++;
   }
 };
 LSB.prototype._reviveFromArchive = function(n){
@@ -634,11 +597,8 @@ LSB.prototype._reviveFromArchive = function(n){
   this.archive.sort(function(a,b){ return a.scoreCache - b.scoreCache; });
   var take = Math.min(n, this.archive.length);
   for(var j=0; j<take; j++){
-    var b = this.archive.shift();
-    b.parked = false;
-    b.lastForkDepth = -999;
-    this.branches.push(b);
-    this.revived++;
+    var b = this.archive.shift(); b.parked = false; b.lastForkDepth = -999;
+    this.branches.push(b); this.revived++;
   }
   return take;
 };
@@ -649,34 +609,26 @@ LSB.prototype._shouldPark = function(b){
 };
 
 LSB.prototype._checkForCuts = function(){
-  var W = this.W, H = this.H;
-  var N = this.N;
+  var W = this.W, H = this.H, N = this.N;
   this.cutChecksRun++;
-
   var canV = this.vMinY <= this.openMinY && this.vMaxY >= this.openMaxY;
   var canH = this.vMinX <= this.openMinX && this.vMaxX >= this.openMaxX;
   if(!canV && !canH){ this.cutGateSkips++; return; }
-
   if(this._visitedCount - this.lastCutCheckVisited < CUT_MIN_VISITED_DELTA) return;
   this.lastCutCheckVisited = this._visitedCount;
 
   var parent = new Int32Array(N);
   for(var i=0; i<N; i++) parent[i] = i;
   function find(x){
-    var r = x;
-    while(parent[r] !== r) r = parent[r];
+    var r = x; while(parent[r] !== r) r = parent[r];
     while(parent[x] !== r){ var nx = parent[x]; parent[x] = r; x = nx; }
     return r;
   }
-  function union(a, b){
-    var ra = find(a), rb = find(b);
-    if(ra !== rb) parent[ra] = rb;
-  }
+  function union(a, b){ var ra = find(a), rb = find(b); if(ra !== rb) parent[ra] = rb; }
   for(var y=0; y<H; y++){
     var base = y * W;
     for(var x=0; x<W; x++){
-      var k = base + x;
-      if(!this.visited[k]) continue;
+      var k = base + x; if(!this.visited[k]) continue;
       if(x + 1 < W && this.visited[k + 1]) union(k, k + 1);
       if(y + 1 < H && this.visited[k + W]) union(k, k + W);
     }
@@ -685,23 +637,18 @@ LSB.prototype._checkForCuts = function(){
   for(var yy=0; yy<H; yy++){
     var b2 = yy * W;
     for(var xx=0; xx<W; xx++){
-      var kk = b2 + xx;
-      if(!this.visited[kk]) continue;
+      var kk = b2 + xx; if(!this.visited[kk]) continue;
       var r = find(kk);
       var bb = bbox[r];
       if(!bb){ bb = { minX: xx, maxX: xx, minY: yy, maxY: yy }; bbox[r] = bb; }
       else {
-        if(xx < bb.minX) bb.minX = xx;
-        if(xx > bb.maxX) bb.maxX = xx;
-        if(yy < bb.minY) bb.minY = yy;
-        if(yy > bb.maxY) bb.maxY = yy;
+        if(xx < bb.minX) bb.minX = xx; if(xx > bb.maxX) bb.maxX = xx;
+        if(yy < bb.minY) bb.minY = yy; if(yy > bb.maxY) bb.maxY = yy;
       }
     }
   }
-  var cutRoots = {};
-  var anyCut = false;
-  var oMinX = this.openMinX, oMaxX = this.openMaxX;
-  var oMinY = this.openMinY, oMaxY = this.openMaxY;
+  var cutRoots = {}, anyCut = false;
+  var oMinX = this.openMinX, oMaxX = this.openMaxX, oMinY = this.openMinY, oMaxY = this.openMaxY;
   for(var r2 in bbox){
     var b3 = bbox[r2];
     if(b3.minY <= oMinY && b3.maxY >= oMaxY){ cutRoots[r2] = 'V'; anyCut = true; }
@@ -712,18 +659,15 @@ LSB.prototype._checkForCuts = function(){
   for(var y3=0; y3<H; y3++){
     var b4 = y3 * W;
     for(var x3=0; x3<W; x3++){
-      var k3 = b4 + x3;
-      if(!this.visited[k3]) continue;
-      var r3 = find(k3);
-      if(cutRoots[r3]) inCut[k3] = 1;
+      var k3 = b4 + x3; if(!this.visited[k3]) continue;
+      var r3 = find(k3); if(cutRoots[r3]) inCut[k3] = 1;
     }
   }
   var goalK = this.goalK;
   var reached = new Uint8Array(N);
   var queue = new Int32Array(N);
   var qh = 0, qt = 0;
-  queue[qt++] = goalK;
-  reached[goalK] = 1;
+  queue[qt++] = goalK; reached[goalK] = 1;
   while(qh < qt){
     var kc = queue[qh++];
     var cx = kc % W, cy = (kc - cx) / W;
@@ -734,8 +678,7 @@ LSB.prototype._checkForCuts = function(){
       var nk = ny2 * W + nx2;
       if(reached[nk]) continue;
       if(inCut[nk]) continue;
-      reached[nk] = 1;
-      queue[qt++] = nk;
+      reached[nk] = 1; queue[qt++] = nk;
     }
   }
   var pruned = 0;
@@ -744,14 +687,10 @@ LSB.prototype._checkForCuts = function(){
     for(var x4=0; x4<W; x4++){
       var k4 = b5 + x4;
       if(this.grid[y4][x4] !== 0) continue;
-      if(reached[k4]) continue;
-      if(inCut[k4]) continue;
-      if(this.visited[k4]) continue;
-      if(this.dead[k4]) continue;
+      if(reached[k4] || inCut[k4] || this.visited[k4] || this.dead[k4]) continue;
       this._markDead(k4);
       this.cutDead[k4] = 1;
-      this.scar[k4] += 0.5;
-      this.scarKeys[k4] = 1;
+      this.scar[k4] += 0.5; this.scarKeys[k4] = 1;
       pruned++;
     }
   }
@@ -808,28 +747,18 @@ LSB.prototype.step = function(budget){
       if(this.done){ stop = true; break; }
     }
     if(stop) break;
-    if(next.length > this.max_branches){
-      next.sort(function(a,b){ return a.scoreCache - b.scoreCache; });
-    }
+    if(next.length > this.max_branches){ next.sort(function(a,b){ return a.scoreCache - b.scoreCache; }); }
     var overflow = [];
-    if(next.length > this.max_branches){
-      overflow = next.slice(this.max_branches);
-      next.length = this.max_branches;
-    }
+    if(next.length > this.max_branches){ overflow = next.slice(this.max_branches); next.length = this.max_branches; }
     this.branches = next;
     for(var oi=0; oi<overflow.length; oi++){
       var ob = overflow[oi];
-      if(this.parked.length < this.max_parked){
-        ob.parked = true; this.parked.push(ob); this.parks++;
-      } else if(this.archive.length < MAX_ARCHIVE){
-        this.archive.push(ob); this.archived++;
-      } else {
+      if(this.parked.length < this.max_parked){ ob.parked = true; this.parked.push(ob); this.parks++; }
+      else if(this.archive.length < MAX_ARCHIVE){ this.archive.push(ob); this.archived++; }
+      else {
         for(var pc=0; pc<ob.path.length; pc++){
-          var c = ob.path[pc];
-          var k = c[1]*W + c[0];
-          this.scar[k] += 0.5;
-          this.scarKeys[k] = 1;
-          this._markDead(k);
+          var c = ob.path[pc]; var k = c[1]*W + c[0];
+          this.scar[k] += 0.5; this.scarKeys[k] = 1; this._markDead(k);
         }
         this.kills++;
       }
@@ -842,17 +771,11 @@ LSB.prototype.step = function(budget){
     for(var fi=0; fi<this._frontierKeys.length; fi++) oldSet[this._frontierKeys[fi]] = 1;
     for(var fi=0; fi<this._frontierKeys.length; fi++){
       var kk = this._frontierKeys[fi];
-      if(!newSet[kk] && this.frontier[kk]){
-        this.frontier[kk] = 0; this._frontierCount--;
-        if(rec) this._deltaFrontierRemoved.push(kk);
-      }
+      if(!newSet[kk] && this.frontier[kk]){ this.frontier[kk] = 0; this._frontierCount--; if(rec) this._deltaFrontierRemoved.push(kk); }
     }
     for(var fj=0; fj<newKeys.length; fj++){
       var kk = newKeys[fj];
-      if(!oldSet[kk] && !this.frontier[kk]){
-        this.frontier[kk] = 1; this._frontierCount++;
-        if(rec) this._deltaFrontier.push(kk);
-      }
+      if(!oldSet[kk] && !this.frontier[kk]){ this.frontier[kk] = 1; this._frontierCount++; if(rec) this._deltaFrontier.push(kk); }
     }
     this._frontierKeys = newKeys;
     var novelAfter = this._visitedCount;
@@ -864,8 +787,7 @@ LSB.prototype.step = function(budget){
       this.deadEndStreak = 0;
     }
     if(this.tick - this.lastNovelTick > this.stallThreshold && this.parked.length > 0){
-      this._unpark(this.minActive);
-      this.lastNovelTick = this.tick;
+      this._unpark(this.minActive); this.lastNovelTick = this.tick;
     }
     if(this.scar_decay > 0 && this.tick % 300 === 0){
       for(var sk in this.scarKeys){
@@ -884,28 +806,22 @@ LSB.prototype.step = function(budget){
 };
 
 LSB.prototype.stepBranch = function(b, next){
-  var W = this.W, H = this.H, N = this.N;
+  var W = this.W, H = this.H;
   if(b.k === this.goalK){ this.done = true; this.path = b.path; return; }
   if(!this.expanded[b.k]){ this.expanded[b.k] = 1; this._expandedCount++; }
   var x0 = b.cell[0], y0 = b.cell[1];
-  var grid = this.grid;
-  var openCount = this.openCount;
-  var blocked = this.blocked;
-  var goalK = this.goalK;
+  var grid = this.grid, openCount = this.openCount, blocked = this.blocked, goalK = this.goalK;
   var opts = [];
   for(var i=0; i<4; i++){
-    var nx = x0 + N4[i][0];
-    var ny = y0 + N4[i][1];
+    var nx = x0 + N4[i][0], ny = y0 + N4[i][1];
     if(nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
     if(grid[ny][nx] !== 0) continue;
     var kk = ny * W + nx;
     if(kk === goalK){ opts.push([nx, ny, kk]); continue; }
     if(blocked[kk]){ this.skippedBlocked++; continue; }
     if(openCount[kk] <= 1){
-      this.scar[kk] += 1.0;
-      this.scarKeys[kk] = 1;
-      this._markDead(kk);
-      this.earlyDeaths++;
+      this.scar[kk] += 1.0; this.scarKeys[kk] = 1;
+      this._markDead(kk); this.earlyDeaths++;
       continue;
     }
     opts.push([nx, ny, kk]);
@@ -920,8 +836,7 @@ LSB.prototype.stepBranch = function(b, next){
   var primary = opts[0];
   var canFork = (b.depth - b.lastForkDepth) >= FORK_COOLDOWN;
   if(opts.length > 1 && canFork){
-    var bestD = dtg[primary[2]];
-    var tiedCount = 1;
+    var bestD = dtg[primary[2]], tiedCount = 1;
     for(var ti=1; ti<opts.length; ti++) if(Math.abs(dtg[opts[ti][2]] - bestD) < this.tryEps) tiedCount++;
     if(tiedCount > 1){
       var wrote = 1;
@@ -930,15 +845,12 @@ LSB.prototype.stepBranch = function(b, next){
         var nb = b.clone();
         var nt = opts[k2];
         nb.stack.push({ cell: b.cell, k: b.k, options: opts.slice(), nextIdx: tiedCount, pathIdx: b.path.length - 1 });
-        nb.path.push(nt);
-        nb.cameFrom = b.cell;
+        nb.path.push(nt); nb.cameFrom = b.cell;
         nb.cell = nt; nb.k = nt[2];
-        nb.depth = b.depth + 1;
-        nb.lastForkDepth = nb.depth;
+        nb.depth = b.depth + 1; nb.lastForkDepth = nb.depth;
         nb.scoreCache = dtg[nt[2]] + 0.25 * nb.depth;
         this._addGenerated(nt[2]);
-        next.push(nb);
-        wrote++;
+        next.push(nb); wrote++;
       }
       b.stack.push({ cell: b.cell, k: b.k, options: opts, nextIdx: tiedCount, pathIdx: b.path.length - 1 });
       b.lastForkDepth = b.depth;
@@ -965,18 +877,15 @@ LSB.prototype.stepBranch = function(b, next){
 };
 
 LSB.prototype.backtrack = function(b, next){
-  var blocked = this.blocked;
-  var goalK = this.goalK;
+  var W = this.W, blocked = this.blocked, goalK = this.goalK;
   this.backtracks++;
   this.deadEndStreak++;
   while(b.stack.length > 0){
     var top = b.stack[b.stack.length - 1];
     if(top.nextIdx < top.options.length){
-      var nt = top.options[top.nextIdx];
-      top.nextIdx++;
+      var nt = top.options[top.nextIdx]; top.nextIdx++;
       if(blocked[nt[2]] && nt[2] !== goalK){ this.skippedBlocked++; continue; }
-      b.path.length = top.pathIdx + 1;
-      b.path.push(nt);
+      b.path.length = top.pathIdx + 1; b.path.push(nt);
       b.cameFrom = top.cell;
       b.cell = nt; b.k = nt[2];
       b.depth = b.path.length - 1;
@@ -988,18 +897,80 @@ LSB.prototype.backtrack = function(b, next){
     b.stack.pop();
   }
   for(var j=0; j<b.path.length; j++){
-    var c2 = b.path[j];
-    var k2 = c2[1]*W + c2[0];
-    this.scar[k2] += 0.5;
-    this.scarKeys[k2] = 1;
-    this._markDead(k2);
+    var c2 = b.path[j]; var k2 = c2[1]*W + c2[0];
+    this.scar[k2] += 0.5; this.scarKeys[k2] = 1; this._markDead(k2);
   }
   this.kills++;
   return true;
 };
 
+// =============== memory estimation ===============
+var BYTES_OBJ_HEADER = 48;
+var BYTES_SMALL_ARRAY = 32;
+var BYTES_PER_NUMBER = 8;
+var BYTES_PER_SMALL_ARRAY = 48;
+var BYTES_OBJECT_MAP_ENTRY = 72;
+var BYTES_STACK_FRAME = 64;
+
+function estimateBranchBytes(b){
+  var bytes = BYTES_OBJ_HEADER;
+  bytes += BYTES_SMALL_ARRAY + b.path.length * BYTES_PER_SMALL_ARRAY;
+  bytes += BYTES_SMALL_ARRAY;
+  for(var i=0; i<b.stack.length; i++){
+    var s = b.stack[i];
+    bytes += BYTES_STACK_FRAME;
+    bytes += BYTES_SMALL_ARRAY + s.options.length * BYTES_PER_SMALL_ARRAY;
+  }
+  return bytes;
+}
+function estimateAStarBytes(a){
+  var bytes = 0;
+  bytes += a.open.h.length * (BYTES_SMALL_ARRAY + 3 * BYTES_PER_NUMBER + BYTES_PER_SMALL_ARRAY);
+  bytes += countObjEntries(a.gMap) * BYTES_OBJECT_MAP_ENTRY;
+  bytes += countObjEntries(a.came) * (BYTES_OBJECT_MAP_ENTRY + BYTES_SMALL_ARRAY);
+  bytes += countObjEntries(a.closed) * BYTES_OBJECT_MAP_ENTRY;
+  bytes += countObjEntries(a.visited) * BYTES_OBJECT_MAP_ENTRY;
+  bytes += countObjEntries(a.generated) * BYTES_OBJECT_MAP_ENTRY;
+  bytes += countObjEntries(a.expanded) * BYTES_OBJECT_MAP_ENTRY;
+  bytes += countObjEntries(a.frontier) * BYTES_OBJECT_MAP_ENTRY;
+  return bytes;
+}
+function estimateDFSBytes(d){
+  var bytes = 0;
+  bytes += d.stack.length * (BYTES_SMALL_ARRAY + 2 * BYTES_PER_NUMBER);
+  bytes += countObjEntries(d.came) * (BYTES_OBJECT_MAP_ENTRY + BYTES_SMALL_ARRAY);
+  bytes += countObjEntries(d.visited) * BYTES_OBJECT_MAP_ENTRY;
+  bytes += countObjEntries(d.generated) * BYTES_OBJECT_MAP_ENTRY;
+  bytes += countObjEntries(d.expanded) * BYTES_OBJECT_MAP_ENTRY;
+  bytes += countObjEntries(d.frontier) * BYTES_OBJECT_MAP_ENTRY;
+  return bytes;
+}
+function estimateLSBBytes(l){
+  var bytes = 0;
+  bytes += l.visited.byteLength + l.generated.byteLength + l.expanded.byteLength;
+  bytes += l.dead.byteLength + l.blocked.byteLength + l.cutDead.byteLength;
+  bytes += l.frontier.byteLength + l.scar.byteLength + l.dtg.byteLength + l.openCount.byteLength;
+  for(var bi=0; bi<l.branches.length; bi++) bytes += estimateBranchBytes(l.branches[bi]);
+  for(var pi=0; pi<l.parked.length; pi++) bytes += estimateBranchBytes(l.parked[pi]);
+  for(var ai=0; ai<l.archive.length; ai++) bytes += estimateBranchBytes(l.archive[ai]);
+  return bytes;
+}
+function estimateBytes(algo){
+  if(algo.kind === 'lsb') return estimateLSBBytes(algo);
+  if(algo.kind === 'dfs') return estimateDFSBytes(algo);
+  return estimateAStarBytes(algo);
+}
+
+function makeAlgo(kind, g, start, goal){
+  if(kind === 'A*') return new AStar(g, start, goal);
+  if(kind === 'LSB') return new LSB(g, start, goal);
+  if(kind === 'DFS') return new DFS(g, start, goal);
+  throw new Error('unknown algo ' + kind);
+}
+
 // =============== stats ===============
-function getStats(algo, isLSB){
+function getStats(algo){
+  var isLSB = algo.kind === 'lsb';
   var validPath;
   if(!algo.path){
     validPath = { ok:false, reason:'no path' };
@@ -1007,10 +978,8 @@ function getStats(algo, isLSB){
     validPath = { ok:algo._pathValid, reason:algo._pathReason };
   } else {
     validPath = validatePath(algo.grid, algo.path, algo.start, algo.goal, algo.W, algo.H);
-    algo._pathValid = validPath.ok;
-    algo._pathReason = validPath.reason;
+    algo._pathValid = validPath.ok; algo._pathReason = validPath.reason;
   }
-  var memBytes = isLSB ? estimateLSBBytes(algo) : estimateAStarBytes(algo);
   return {
     expanded: algo._expandedCount,
     generated: algo._generatedCount,
@@ -1037,7 +1006,7 @@ function getStats(algo, isLSB){
     archiveSize: isLSB ? algo.archive.length : null,
     parkedCount: isLSB ? algo.parked.length : null,
     skippedBlocked: isLSB ? algo.skippedBlocked : null,
-    memBytes: memBytes,
+    memBytes: estimateBytes(algo),
     liveBranches: isLSB ? (algo.branches.length + algo.parked.length + algo.archive.length) : null,
     algMs: algo.algMs,
     isLSB: isLSB
@@ -1045,22 +1014,20 @@ function getStats(algo, isLSB){
 }
 
 // =============== recording ===============
-function recordFrames(algo, isLSB){
+function recordFrames(algo){
   var frames = [];
+  var isLSB = algo.kind === 'lsb';
   algo._recording = true;
-  algo._deltaVisited = [];
-  algo._deltaFrontier = [];
-  algo._deltaFrontierRemoved = [];
-  algo._deltaDead = [];
+  algo._deltaVisited = []; algo._deltaFrontier = []; algo._deltaFrontierRemoved = []; algo._deltaDead = [];
 
   frames.push({
     addVisited: keysOf(algo.visited),
     addFrontier: keysOf(algo.frontier),
     remFrontier: [],
-    addDead: isLSB ? keysOf(algo.dead) : [],
+    addDead: algo.dead ? keysOf(algo.dead) : [],
     path: null,
     parked: isLSB && algo.parked ? algo.parked.map(function(b){ return b.k; }) : null,
-    stats: getStats(algo, isLSB)
+    stats: getStats(algo)
   });
 
   var recorded = 1;
@@ -1071,13 +1038,10 @@ function recordFrames(algo, isLSB){
     var remFrontier = algo._deltaFrontierRemoved; algo._deltaFrontierRemoved = [];
     var addDead = algo._deltaDead; algo._deltaDead = [];
     frames.push({
-      addVisited: addVisited,
-      addFrontier: addFrontier,
-      remFrontier: remFrontier,
-      addDead: addDead,
+      addVisited: addVisited, addFrontier: addFrontier, remFrontier: remFrontier, addDead: addDead,
       path: algo.path ? algo.path.slice() : null,
       parked: isLSB && algo.parked ? algo.parked.map(function(b){ return b.k; }) : null,
-      stats: getStats(algo, isLSB)
+      stats: getStats(algo)
     });
     recorded++;
   }
@@ -1086,20 +1050,20 @@ function recordFrames(algo, isLSB){
 }
 
 function buildRecording(){
-  var a = new AStar(grid, START, GOAL);
-  var l = new LSB(grid, START, GOAL);
-  var framesA = recordFrames(a, false);
-  var framesL = recordFrames(l, true);
-  var ticks = Math.max(framesA.length, framesL.length);
-  var idleA = framesA[framesA.length-1];
-  while(framesA.length < ticks)
-    framesA.push({ addVisited:[], addFrontier:[], remFrontier:[], addDead:[],
-                   path: idleA.path, parked: idleA.parked, stats: idleA.stats });
+  var L = makeAlgo(LEFT_ALGO, grid, START, GOAL);
+  var R = makeAlgo(RIGHT_ALGO, grid, START, GOAL);
+  var framesL = recordFrames(L);
+  var framesR = recordFrames(R);
+  var ticks = Math.max(framesL.length, framesR.length);
   var idleL = framesL[framesL.length-1];
   while(framesL.length < ticks)
     framesL.push({ addVisited:[], addFrontier:[], remFrontier:[], addDead:[],
                    path: idleL.path, parked: idleL.parked, stats: idleL.stats });
-  return { framesA: framesA, framesL: framesL, ticks: ticks, grid: grid, START: START, GOAL: GOAL, W: W, H: H };
+  var idleR = framesR[framesR.length-1];
+  while(framesR.length < ticks)
+    framesR.push({ addVisited:[], addFrontier:[], remFrontier:[], addDead:[],
+                   path: idleR.path, parked: idleR.parked, stats: idleR.stats });
+  return { framesA: framesL, framesL: framesR, ticks: ticks, grid: grid, START: START, GOAL: GOAL, W: W, H: H };
 }
 
 // =============== playback ===============
@@ -1148,10 +1112,9 @@ var cL = document.getElementById('cL');
 var ctxA = cA.getContext('2d');
 var ctxL = cL.getContext('2d');
 
-var COLOR = {
-  wall:'#555', open:'#000', start:'#0a0', goal:'#c0c',
-  frontier:'#ff0', parked:'#f80', visited:'#2a4a7a', path:'#0ff', dead:'#a00'
-};
+var COLOR = { wall:'#555', open:'#000', start:'#0a0', goal:'#c0c',
+  frontier:'#ff0', parked:'#f80', visited:'#2a4a7a', path:'#0ff', dead:'#a00' };
+
 function draw(ctx, g, view, path, parked, W, H){
   ctx.fillStyle = COLOR.open;
   ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
@@ -1191,7 +1154,7 @@ function fmtStats(stats){
     s += 'early dead: <b>' + stats.earlyDeaths + '</b><br>';
     s += 'archive: <b>' + stats.archiveSize + '</b>  archived: <b>' + stats.archived + '</b>  revived: <b>' + stats.revived + '</b><br>';
     s += 'cuts: <b>' + stats.cutsMade + '</b>  checks: <b>' + stats.cutChecksRun + '</b>  gate-skips: <b>' + stats.cutGateSkips + '</b>  pruned: <b>' + stats.cutCellsPruned + '</b><br>';
-    s += 'cut-killed branches: <b>' + stats.cutKilledBranches + '</b><br>';
+    s += 'cut-killed: <b>' + stats.cutKilledBranches + '</b><br>';
   }
   s += 'done: <b>' + stats.done + '</b>';
   if(stats.exhausted) s += ' <span style="color:#f88">(exhausted)</span>';
@@ -1223,7 +1186,6 @@ function setSpeed(s){
     btns[i].className = (Math.abs(v - s) < 1e-6) ? 'speed-btn speed-on' : 'speed-btn';
   }
 }
-
 function setSize(w, h){
   W = w; H = h;
   CELL = Math.max(1, Math.floor(600 / W));
@@ -1255,6 +1217,14 @@ function setScenario(name){
 }
 function restartSame(){ buildAndPlay(); }
 
+function changeAlgo(side, kind){
+  if(side === 'left') LEFT_ALGO = kind;
+  else RIGHT_ALGO = kind;
+  document.getElementById('hLeft').innerText = LEFT_ALGO;
+  document.getElementById('hRight').innerText = RIGHT_ALGO;
+  buildAndPlay();
+}
+
 function buildAndPlay(){
   var banner = document.getElementById('banner');
   banner.style.display = 'block';
@@ -1269,7 +1239,7 @@ function buildAndPlay(){
     var computeMs = performance.now() - t0;
     recording.computeMs = computeMs;
     banner.textContent = 'Recorded ' + recording.ticks + ' frames in ' + fmtTime(computeMs) +
-                         ' (A*: ' + recording.framesA.length + ', LSB: ' + recording.framesL.length + ')';
+                         ' (' + LEFT_ALGO + ': ' + recording.framesA.length + ', ' + RIGHT_ALGO + ': ' + recording.framesL.length + ')';
     setTimeout(function(){ banner.style.display = 'none'; }, 2500);
     resetPlayback();
     paused = false; finished = false; lastFrameTime = 0;
@@ -1312,22 +1282,19 @@ function loop(now){
 }
 
 // =============== mass test ===============
-var MASS_MIN_TIME_MS = 5;
-var MASS_MAX_REPS = 30;
 var lastSeeds = null;
 var lastN = 0;
 
-function runOneOnce(factory, isLSB){
+function runOneOnce(factory){
   var algo = factory();
   var iters = 0;
   while(!algo.done && iters < MASS_MAX_ITERS){ algo.step(MASS_BUDGET); iters++; }
-  var s = getStats(algo, isLSB);
-  return { stats: s, algMs: algo.algMs };
+  return { stats: getStats(algo), algMs: algo.algMs };
 }
-function runBench(factory, isLSB){
+function runBench(factory){
   var totalMs = 0, reps = 0, last = null;
   while(reps < MASS_MAX_REPS){
-    last = runOneOnce(factory, isLSB);
+    last = runOneOnce(factory);
     totalMs += last.algMs; reps++;
     if(totalMs >= MASS_MIN_TIME_MS) break;
   }
@@ -1353,167 +1320,175 @@ function massTest(reuse, N){
       lastSeeds = plans;
       lastN = N;
     }
+    var LKind = LEFT_ALGO, RKind = RIGHT_ALGO;
+    var lsbSide = (LKind === 'LSB') ? 'L' : (RKind === 'LSB' ? 'R' : null);
     var rows = [];
     var aSuccess = 0, lSuccess = 0, aWins = 0, lWins = 0, ties = 0;
     var acc = { aTime:0, lTime:0, aExp:0, lExp:0, aPath:0, lPath:0,
                 aMem:0, lMem:0,
-                lBT:0, lParks:0, lRes:0, lKills:0, lED:0, lCuts:0, lPruned:0,
-                lCutKill:0, lChecks:0, lGate:0, lArch:0, lReviv:0, lSkip:0, n:0 };
+                lsbBT:0, lsbParks:0, lsbRes:0, lsbKills:0, lsbED:0, lsbCuts:0, lsbPruned:0,
+                lsbCutKill:0, lsbChecks:0, lsbGate:0, lsbArch:0, lsbReviv:0, lsbSkip:0, n:0 };
     for(var pi=0; pi<plans.length; pi++){
       var plan = plans[pi];
       var g = plan.fn(plan.seed);
       var S = [1,1], G = [W-3, H-3];
-      var ra = runBench(function(){ return new AStar(g, S, G); }, false);
-      var rl = runBench(function(){ return new LSB(g, S, G); }, true);
+      var ra = runBench(function(){ return makeAlgo(LKind, g, S, G); });
+      var rl = runBench(function(){ return makeAlgo(RKind, g, S, G); });
       var aOk = ra.stats.success, lOk = rl.stats.success;
       if(aOk) aSuccess++;
       if(lOk) lSuccess++;
       var verdict;
       if(!aOk && !lOk) verdict = 'both FAIL';
-      else if(!lOk) verdict = 'A* (LSB fail)';
-      else if(!aOk) verdict = 'LSB (A* fail)';
-      else if(ra.stats.expanded < rl.stats.expanded){ verdict = 'A*'; aWins++; }
-      else if(rl.stats.expanded < ra.stats.expanded){ verdict = 'LSB'; lWins++; }
+      else if(!lOk) verdict = LKind + ' (' + RKind + ' fail)';
+      else if(!aOk) verdict = RKind + ' (' + LKind + ' fail)';
+      else if(ra.stats.expanded < rl.stats.expanded){ verdict = LKind; aWins++; }
+      else if(rl.stats.expanded < ra.stats.expanded){ verdict = RKind; lWins++; }
       else { verdict = 'tie'; ties++; }
+
+      var lsbStats = null;
+      if(lsbSide === 'L') lsbStats = ra.stats;
+      else if(lsbSide === 'R') lsbStats = rl.stats;
+
       if(aOk && lOk){
         acc.aTime += ra.avgMs; acc.lTime += rl.avgMs;
         acc.aExp += ra.stats.expanded; acc.lExp += rl.stats.expanded;
         acc.aPath += ra.stats.pathLen || 0; acc.lPath += rl.stats.pathLen || 0;
         acc.aMem += ra.stats.memBytes; acc.lMem += rl.stats.memBytes;
-        acc.lBT += rl.stats.backtracks || 0; acc.lParks += rl.stats.parks || 0;
-        acc.lRes += rl.stats.resumes || 0; acc.lKills += rl.stats.kills || 0;
-        acc.lED += rl.stats.earlyDeaths || 0;
-        acc.lCuts += rl.stats.cutsMade || 0;
-        acc.lPruned += rl.stats.cutCellsPruned || 0;
-        acc.lCutKill += rl.stats.cutKilledBranches || 0;
-        acc.lChecks += rl.stats.cutChecksRun || 0;
-        acc.lGate += rl.stats.cutGateSkips || 0;
-        acc.lArch += rl.stats.archived || 0;
-        acc.lReviv += rl.stats.revived || 0;
-        acc.lSkip += rl.stats.skippedBlocked || 0;
+        if(lsbStats){
+          acc.lsbBT += lsbStats.backtracks || 0;
+          acc.lsbParks += lsbStats.parks || 0;
+          acc.lsbRes += lsbStats.resumes || 0;
+          acc.lsbKills += lsbStats.kills || 0;
+          acc.lsbED += lsbStats.earlyDeaths || 0;
+          acc.lsbCuts += lsbStats.cutsMade || 0;
+          acc.lsbPruned += lsbStats.cutCellsPruned || 0;
+          acc.lsbCutKill += lsbStats.cutKilledBranches || 0;
+          acc.lsbChecks += lsbStats.cutChecksRun || 0;
+          acc.lsbGate += lsbStats.cutGateSkips || 0;
+          acc.lsbArch += lsbStats.archived || 0;
+          acc.lsbReviv += lsbStats.revived || 0;
+          acc.lsbSkip += lsbStats.skippedBlocked || 0;
+        }
         acc.n++;
       }
       rows.push({
         type: plan.type, seed: plan.seed,
-        aTime: ra.avgMs, lTime: rl.avgMs,
-        aReps: ra.reps, lReps: rl.reps,
+        aTime: ra.avgMs, lTime: rl.avgMs, aReps: ra.reps, lReps: rl.reps,
         aExp: ra.stats.expanded, lExp: rl.stats.expanded,
         aPath: ra.stats.pathLen, lPath: rl.stats.pathLen,
         aMem: ra.stats.memBytes, lMem: rl.stats.memBytes,
-        lLive: rl.stats.liveBranches,
         aSuccess: aOk, lSuccess: lOk, lReason: rl.stats.pathReason,
-        lBT: rl.stats.backtracks, lParks: rl.stats.parks, lRes: rl.stats.resumes, lKills: rl.stats.kills,
-        lED: rl.stats.earlyDeaths, lCuts: rl.stats.cutsMade, lPruned: rl.stats.cutCellsPruned,
-        lCutKill: rl.stats.cutKilledBranches, lChecks: rl.stats.cutChecksRun, lGate: rl.stats.cutGateSkips,
-        lArch: rl.stats.archived, lReviv: rl.stats.revived, lSkip: rl.stats.skippedBlocked,
+        lsbStats: lsbStats,
         verdict: verdict
       });
     }
     function pad(s, n){ s = String(s); while(s.length < n) s += ' '; return s.slice(0, n); }
     function padL(s, n){ s = String(s); while(s.length < n) s = ' ' + s; return s.slice(-n); }
-    function fmtBytesShort(b){
-      if(b < 1024) return b + 'B';
-      if(b < 1024*1024) return (b/1024).toFixed(0) + 'K';
-      return (b/1024/1024).toFixed(1) + 'M';
-    }
+
     var txt = '';
     txt += 'MASS TEST - ' + N + ' mazes (' + W + 'x' + H + ')' + (reuse && lastN === N ? '  [reused]' : '  [fresh]') + '\n';
+    txt += 'Left: ' + LKind + '   Right: ' + RKind + '\n';
     txt += 'Verdict by expanded-cells. Success requires validated path.\n';
-    txt += 'Memory is a rough estimate (typed arrays exact; JS objects estimated).\n\n';
-    txt += pad('type', 9) + padL('seed', 12) + padL('A*t', 10) + padL('LSBt', 10)
-         + padL('A*exp', 7) + padL('LSBexp', 8) + padL('A*mem', 7) + padL('LSBmem', 8)
-         + padL('A*pth', 7) + padL('LSBpth', 8)
-         + padL('ok', 4) + padL('rep', 7)
-         + padL('LSBbt', 7) + padL('park', 5) + padL('kill', 5)
-         + padL('eDead', 6) + padL('chk', 4) + padL('cuts', 5) + padL('prune', 6) + padL('cKill', 6)
-         + padL('arch', 5) + padL('rev', 4) + padL('skipB', 6)
-         + '  verdict\n';
-    txt += '-----------------------------------------------------------------------------------------------------------------------------------------------------------\n';
+    txt += 'Memory is a rough estimate (typed arrays exact; JS objects estimated).\n';
+    if(!lsbSide) txt += 'Note: LSB-specific columns shown as "-" (neither side is LSB).\n';
+    txt += '\n';
+
+    txt += pad('type', 9) + padL('seed', 12)
+         + padL('Lt', 10) + padL('Rt', 10)
+         + padL('Lexp', 7) + padL('Rexp', 7)
+         + padL('Lmem', 7) + padL('Rmem', 7)
+         + padL('Lpth', 7) + padL('Rpth', 7)
+         + padL('ok', 4) + padL('rep', 7);
+    if(lsbSide) txt += padL('bt', 6) + padL('park', 5) + padL('kill', 5) + padL('eD', 5)
+                     + padL('chk', 4) + padL('cuts', 5) + padL('prune', 6) + padL('cKill', 5)
+                     + padL('arch', 5) + padL('rev', 4) + padL('skipB', 6);
+    txt += '  verdict\n';
+    txt += '-----------------------------------------------------------------------------------------------------------\n';
     for(var ri=0; ri<rows.length; ri++){
       var r = rows[ri];
       txt += pad(r.type, 9) + padL(r.seed.toString(16), 12)
           + padL(fmtTime(r.aTime), 10) + padL(fmtTime(r.lTime), 10)
-          + padL(r.aExp, 7) + padL(r.lExp, 8)
-          + padL(fmtBytesShort(r.aMem), 7) + padL(fmtBytesShort(r.lMem), 8)
-          + padL(r.aPath === null ? '-' : r.aPath, 7) + padL(r.lPath === null ? '-' : r.lPath, 8)
+          + padL(r.aExp, 7) + padL(r.lExp, 7)
+          + padL(fmtBytesShort(r.aMem), 7) + padL(fmtBytesShort(r.lMem), 7)
+          + padL(r.aPath === null ? '-' : r.aPath, 7) + padL(r.lPath === null ? '-' : r.lPath, 7)
           + padL(r.aSuccess && r.lSuccess ? 'Y/Y' : (r.aSuccess ? 'Y/N' : 'N/N'), 4)
-          + padL(r.aReps + '/' + r.lReps, 7)
-          + padL(r.lBT === null ? '-' : r.lBT, 7) + padL(r.lParks === null ? '-' : r.lParks, 5)
-          + padL(r.lKills === null ? '-' : r.lKills, 5)
-          + padL(r.lED === null ? '-' : r.lED, 6)
-          + padL(r.lChecks === null ? '-' : r.lChecks, 4)
-          + padL(r.lCuts === null ? '-' : r.lCuts, 5)
-          + padL(r.lPruned === null ? '-' : r.lPruned, 6)
-          + padL(r.lCutKill === null ? '-' : r.lCutKill, 6)
-          + padL(r.lArch === null ? '-' : r.lArch, 5)
-          + padL(r.lReviv === null ? '-' : r.lReviv, 4)
-          + padL(r.lSkip === null ? '-' : r.lSkip, 6)
-          + '  ' + r.verdict + '\n';
-      if(!r.lSuccess && r.lReason && r.lReason !== 'no path') txt += '  LSB path invalid: ' + r.lReason + '\n';
+          + padL(r.aReps + '/' + r.lReps, 7);
+      if(lsbSide){
+        var ls = r.lsbStats;
+        txt += padL(ls ? ls.backtracks : '-', 6) + padL(ls ? ls.parks : '-', 5)
+             + padL(ls ? ls.kills : '-', 5) + padL(ls ? ls.earlyDeaths : '-', 5)
+             + padL(ls ? ls.cutChecksRun : '-', 4) + padL(ls ? ls.cutsMade : '-', 5)
+             + padL(ls ? ls.cutCellsPruned : '-', 6) + padL(ls ? ls.cutKilledBranches : '-', 5)
+             + padL(ls ? ls.archived : '-', 5) + padL(ls ? ls.revived : '-', 4)
+             + padL(ls ? ls.skippedBlocked : '-', 6);
+      }
+      txt += '  ' + r.verdict + '\n';
+      if(!r.lSuccess && r.lReason && r.lReason !== 'no path') txt += '  ' + RKind + ' path invalid: ' + r.lReason + '\n';
     }
-    txt += '-----------------------------------------------------------------------------------------------------------------------------------------------------------\n';
+    txt += '-----------------------------------------------------------------------------------------------------------\n';
     if(acc.n > 0){
       txt += pad('AVG', 9) + padL('', 12)
           + padL(fmtTime(acc.aTime/acc.n), 10) + padL(fmtTime(acc.lTime/acc.n), 10)
-          + padL(Math.round(acc.aExp/acc.n), 7) + padL(Math.round(acc.lExp/acc.n), 8)
-          + padL(fmtBytesShort(acc.aMem/acc.n), 7) + padL(fmtBytesShort(acc.lMem/acc.n), 8)
-          + padL(Math.round(acc.aPath/acc.n), 7) + padL(Math.round(acc.lPath/acc.n), 8)
-          + padL('', 4) + padL('', 7)
-          + padL(Math.round(acc.lBT/acc.n), 7) + padL(Math.round(acc.lParks/acc.n), 5)
-          + padL(Math.round(acc.lKills/acc.n), 5)
-          + padL(Math.round(acc.lED/acc.n), 6)
-          + padL(Math.round(acc.lChecks/acc.n), 4)
-          + padL(Math.round(acc.lCuts/acc.n), 5)
-          + padL(Math.round(acc.lPruned/acc.n), 6)
-          + padL(Math.round(acc.lCutKill/acc.n), 6)
-          + padL(Math.round(acc.lArch/acc.n), 5)
-          + padL(Math.round(acc.lReviv/acc.n), 4)
-          + padL(Math.round(acc.lSkip/acc.n), 6)
-          + '  (n=' + acc.n + ')\n';
+          + padL(Math.round(acc.aExp/acc.n), 7) + padL(Math.round(acc.lExp/acc.n), 7)
+          + padL(fmtBytesShort(acc.aMem/acc.n), 7) + padL(fmtBytesShort(acc.lMem/acc.n), 7)
+          + padL(Math.round(acc.aPath/acc.n), 7) + padL(Math.round(acc.lPath/acc.n), 7)
+          + padL('', 4) + padL('', 7);
+      if(lsbSide){
+        txt += padL(Math.round(acc.lsbBT/acc.n), 6) + padL(Math.round(acc.lsbParks/acc.n), 5)
+             + padL(Math.round(acc.lsbKills/acc.n), 5) + padL(Math.round(acc.lsbED/acc.n), 5)
+             + padL(Math.round(acc.lsbChecks/acc.n), 4) + padL(Math.round(acc.lsbCuts/acc.n), 5)
+             + padL(Math.round(acc.lsbPruned/acc.n), 6) + padL(Math.round(acc.lsbCutKill/acc.n), 5)
+             + padL(Math.round(acc.lsbArch/acc.n), 5) + padL(Math.round(acc.lsbReviv/acc.n), 4)
+             + padL(Math.round(acc.lsbSkip/acc.n), 6);
+      }
+      txt += '  (n=' + acc.n + ')\n';
     }
-    txt += '\nSUCCESS  A*: ' + aSuccess + '/' + N + '   LSB: ' + lSuccess + '/' + N + '\n';
-    txt += 'WINS  A*: ' + aWins + '   LSB: ' + lWins + '   tie: ' + ties + '\n\n';
-    txt += 'MEMORY (avg over successful runs):\n';
+    txt += '\nSUCCESS  ' + LKind + ': ' + aSuccess + '/' + N + '   ' + RKind + ': ' + lSuccess + '/' + N + '\n';
+    txt += 'WINS  ' + LKind + ': ' + aWins + '   ' + RKind + ': ' + lWins + '   tie: ' + ties + '\n\n';
+
     if(acc.n > 0){
+      txt += 'MEMORY (avg over successful runs):\n';
       var ratio = acc.aMem > 0 ? (acc.lMem / acc.aMem) : 0;
-      txt += '  A*  avg ' + fmtBytes(acc.aMem/acc.n) + '\n';
-      txt += '  LSB avg ' + fmtBytes(acc.lMem/acc.n) + '   (LSB/A* ratio = ' + ratio.toFixed(2) + 'x)\n';
+      txt += '  ' + LKind + '  avg ' + fmtBytes(acc.aMem/acc.n) + '\n';
+      txt += '  ' + RKind + '  avg ' + fmtBytes(acc.lMem/acc.n) + '   (R/L ratio = ' + ratio.toFixed(2) + 'x)\n\n';
     }
-    txt += '\nPer-type breakdown (both solved):\n';
+
+    txt += 'Per-type breakdown (both solved):\n';
     for(var mi=0; mi<MAZE_TYPES.length; mi++){
       var t2 = MAZE_TYPES[mi];
       var sub = [];
       for(var si=0; si<rows.length; si++)
         if(rows[si].type === t2.name && rows[si].aSuccess && rows[si].lSuccess) sub.push(rows[si]);
       if(sub.length === 0){ txt += '  ' + pad(t2.name, 9) + '  (none)\n'; continue; }
-      var aAvgSum = 0, lAvgSum = 0, lBTSum = 0, lEDSum = 0, lCutsSum = 0, lPrunedSum = 0,
-          lChecksSum = 0, lArchSum = 0, lRevivSum = 0, lSkipSum = 0, lMemSum = 0, aMemSum = 0;
+      var aAvgSum = 0, lAvgSum = 0, aMemSum = 0, lMemSum = 0, lsbBTSum = 0, lsbCutsSum = 0, lsbEDSum = 0;
       for(var xi=0; xi<sub.length; xi++){
         aAvgSum += sub[xi].aExp; lAvgSum += sub[xi].lExp;
         aMemSum += sub[xi].aMem; lMemSum += sub[xi].lMem;
-        lBTSum += sub[xi].lBT || 0; lEDSum += sub[xi].lED || 0;
-        lCutsSum += sub[xi].lCuts || 0; lPrunedSum += sub[xi].lPruned || 0;
-        lChecksSum += sub[xi].lChecks || 0;
-        lArchSum += sub[xi].lArch || 0; lRevivSum += sub[xi].lReviv || 0;
-        lSkipSum += sub[xi].lSkip || 0;
+        if(sub[xi].lsbStats){
+          lsbBTSum += sub[xi].lsbStats.backtracks || 0;
+          lsbCutsSum += sub[xi].lsbStats.cutsMade || 0;
+          lsbEDSum += sub[xi].lsbStats.earlyDeaths || 0;
+        }
       }
-      txt += '  ' + pad(t2.name, 9) + '  A* exp ' + padL(Math.round(aAvgSum/sub.length), 7)
-           + '   LSB exp ' + padL(Math.round(lAvgSum/sub.length), 7)
-           + '   A*mem ' + padL(fmtBytesShort(aMemSum/sub.length), 6)
-           + '   LSBmem ' + padL(fmtBytesShort(lMemSum/sub.length), 6)
-           + '   bt ' + padL(Math.round(lBTSum/sub.length), 5)
-           + '   eDead ' + padL(Math.round(lEDSum/sub.length), 5)
-           + '   chk ' + padL(Math.round(lChecksSum/sub.length), 4)
-           + '   cuts ' + padL(Math.round(lCutsSum/sub.length), 4)
-           + '   pruned ' + padL(Math.round(lPrunedSum/sub.length), 5)
-           + '   arch ' + padL(Math.round(lArchSum/sub.length), 4)
-           + '   rev ' + padL(Math.round(lRevivSum/sub.length), 4)
-           + '   skipB ' + padL(Math.round(lSkipSum/sub.length), 5)
-           + '   n=' + sub.length + '\n';
+      txt += '  ' + pad(t2.name, 9) + '  ' + LKind + ' exp ' + padL(Math.round(aAvgSum/sub.length), 7)
+           + '   ' + RKind + ' exp ' + padL(Math.round(lAvgSum/sub.length), 7)
+           + '   ' + LKind + ' mem ' + padL(fmtBytesShort(aMemSum/sub.length), 6)
+           + '   ' + RKind + ' mem ' + padL(fmtBytesShort(lMemSum/sub.length), 6);
+      if(lsbSide){
+        txt += '   lsb bt ' + padL(Math.round(lsbBTSum/sub.length), 5)
+             + '   cuts ' + padL(Math.round(lsbCutsSum/sub.length), 4)
+             + '   eDead ' + padL(Math.round(lEDSum || lsbEDSum)/sub.length, 5);
+      }
+      txt += '   n=' + sub.length + '\n';
     }
     out.textContent = txt;
   }, 30);
 }
+
+document.getElementById('hLeft').innerText = LEFT_ALGO;
+document.getElementById('hRight').innerText = RIGHT_ALGO;
+document.getElementById('leftSel').value = LEFT_ALGO;
+document.getElementById('rightSel').value = RIGHT_ALGO;
 
 setSpeed(1);
 setSize(100, 50);
