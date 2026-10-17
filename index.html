@@ -13,6 +13,7 @@
   .panel { background:#181818; padding:8px; border-radius:6px; }
   .stats { font-size:12px; line-height:1.5; color:#bbb; }
   .stats b { color:#fff; }
+  .mem { color:#8fb; }
   .meta { font-size:11px; color:#888; margin-top:6px; border-top:1px solid #333; padding-top:6px; }
   button { background:#2a2a2a; color:#eee; border:1px solid #444; padding:8px 12px;
            border-radius:5px; font-family:monospace; font-size:13px; margin:3px; }
@@ -36,6 +37,8 @@
   <button class="size-btn" data-w="100" data-h="50"  onclick="setSize(100,50)">100x50</button>
   <button class="size-btn" data-w="150" data-h="75"  onclick="setSize(150,75)">150x75</button>
   <button class="size-btn" data-w="200" data-h="100" onclick="setSize(200,100)">200x100</button>
+  <button class="size-btn" data-w="300" data-h="150" onclick="setSize(300,150)">300x150</button>
+  <button class="size-btn" data-w="400" data-h="200" onclick="setSize(400,200)">400x200</button>
 </div>
 
 <div class="panel" style="margin-bottom:8px;">
@@ -53,8 +56,10 @@
 </div>
 
 <div class="panel" style="margin-bottom:8px;">
-  <button style="background:#333;border-color:#666" onclick="massTest(false)">Mass test (12)</button>
-  <button style="background:#333;border-color:#666" onclick="massTest(true)">Reuse last seeds</button>
+  <button style="background:#333;border-color:#666" onclick="massTest(false, 12)">Mass test (12)</button>
+  <button style="background:#333;border-color:#666" onclick="massTest(true, 12)">Reuse last (12)</button>
+  <button style="background:#333;border-color:#666" onclick="massTest(false, 50)">Mass test (50)</button>
+  <button style="background:#333;border-color:#666" onclick="massTest(true, 50)">Reuse last (50)</button>
 </div>
 
 <div class="panel" style="margin-bottom:8px;">
@@ -91,8 +96,9 @@
 var W = 100, H = 50;
 var CELL = 5;
 var RECORD_BUDGET = 1;
-var RECORD_MAX_FRAMES = 15000;
+var RECORD_MAX_FRAMES = 40000;
 var MASS_BUDGET = 8;
+var MASS_MAX_ITERS = 200000;
 var TICK_DELAY = 16;
 var PLAYBACK_SPEED = 1;
 
@@ -269,6 +275,11 @@ function fmtTime(ms){
   if(ms < 1000)  return ms.toFixed(2) + 'ms';
   return (ms / 1000).toFixed(3) + 's';
 }
+function fmtBytes(b){
+  if(b < 1024) return b + ' B';
+  if(b < 1024*1024) return (b/1024).toFixed(1) + ' KB';
+  return (b/1024/1024).toFixed(2) + ' MB';
+}
 
 function MinHeap(){ this.h = []; }
 MinHeap.prototype.push = function(item){
@@ -299,6 +310,65 @@ MinHeap.prototype.pop = function(){
   return top;
 };
 Object.defineProperty(MinHeap.prototype, 'size', { get: function(){ return this.h.length; } });
+
+// =============== memory estimation ===============
+// Rough per-object costs. Numbers are JS engine dependent; they're here to
+// compare A* vs LSB, not to give byte-exact numbers.
+var BYTES_OBJ_HEADER = 48;         // any object
+var BYTES_SMALL_ARRAY = 32;        // empty array
+var BYTES_PER_NUMBER = 8;          // Number in a dense array
+var BYTES_PER_SMALL_ARRAY = 48;    // [x,y] pair
+var BYTES_OBJECT_MAP_ENTRY = 72;   // string-keyed map entry (conservative)
+var BYTES_STACK_FRAME = 64;        // {cell, k, options, nextIdx, pathIdx}
+
+function estimateBranchBytes(b){
+  var bytes = BYTES_OBJ_HEADER;
+  bytes += BYTES_SMALL_ARRAY + b.path.length * BYTES_PER_SMALL_ARRAY;
+  bytes += BYTES_SMALL_ARRAY;
+  for(var i=0; i<b.stack.length; i++){
+    var s = b.stack[i];
+    bytes += BYTES_STACK_FRAME;
+    bytes += BYTES_SMALL_ARRAY + s.options.length * BYTES_PER_SMALL_ARRAY;
+  }
+  return bytes;
+}
+function estimateAStarBytes(a){
+  var bytes = 0;
+  bytes += a.open.h.length * (BYTES_SMALL_ARRAY + 3 * BYTES_PER_NUMBER + BYTES_PER_SMALL_ARRAY);
+  bytes += countObjEntries(a.gMap) * BYTES_OBJECT_MAP_ENTRY;
+  bytes += countObjEntries(a.came) * BYTES_OBJECT_MAP_ENTRY;
+  bytes += countObjEntries(a.closed) * BYTES_OBJECT_MAP_ENTRY;
+  bytes += countObjEntries(a.visited) * BYTES_OBJECT_MAP_ENTRY;
+  bytes += countObjEntries(a.generated) * BYTES_OBJECT_MAP_ENTRY;
+  bytes += countObjEntries(a.expanded) * BYTES_OBJECT_MAP_ENTRY;
+  bytes += countObjEntries(a.frontier) * BYTES_OBJECT_MAP_ENTRY;
+  return bytes;
+}
+function countObjEntries(o){
+  var n = 0;
+  for(var k in o) if(o[k]) n++;
+  return n;
+}
+function estimateLSBBytes(l){
+  var bytes = 0;
+  // Typed arrays (exact)
+  bytes += l.visited.byteLength;
+  bytes += l.generated.byteLength;
+  bytes += l.expanded.byteLength;
+  bytes += l.dead.byteLength;
+  bytes += l.blocked.byteLength;
+  bytes += l.cutDead.byteLength;
+  bytes += l.frontier.byteLength;
+  bytes += l.scar.byteLength;
+  bytes += l.dtg.byteLength;
+  bytes += l.openCount.byteLength;
+  // Live branches
+  var bi;
+  for(bi=0; bi<l.branches.length; bi++) bytes += estimateBranchBytes(l.branches[bi]);
+  for(bi=0; bi<l.parked.length; bi++) bytes += estimateBranchBytes(l.parked[bi]);
+  for(bi=0; bi<l.archive.length; bi++) bytes += estimateBranchBytes(l.archive[bi]);
+  return bytes;
+}
 
 // =============== A* ===============
 function AStar(g, start, goal){
@@ -376,14 +446,12 @@ AStar.prototype._recon = function(end){
 };
 
 // =============== LSB ===============
-// pathSet removed entirely. Every cell on a branch's path is already in
-// `visited`, so the path check was redundant. `blocked` = visited | dead,
-// so hot-path neighbor filtering is one lookup instead of two.
 function Branch(cell, path, cameFrom, W){
   this.cell = cell;
   this.k = cell[1] * W + cell[0];
   this.path = path.slice();
   this.cameFrom = cameFrom;
+  this.W = W;
   this.stack = [];
   this.parked = false;
   this.scoreCache = 0;
@@ -466,7 +534,7 @@ function LSB(g, start, goal){
   this.generated = new Uint8Array(N);
   this.expanded  = new Uint8Array(N);
   this.dead      = new Uint8Array(N);
-  this.blocked   = new Uint8Array(N);   // visited | dead
+  this.blocked   = new Uint8Array(N);
   this.cutDead   = new Uint8Array(N);
   this.frontier  = new Uint8Array(N);
   this.scar      = new Float32Array(N);
@@ -942,6 +1010,7 @@ function getStats(algo, isLSB){
     algo._pathValid = validPath.ok;
     algo._pathReason = validPath.reason;
   }
+  var memBytes = isLSB ? estimateLSBBytes(algo) : estimateAStarBytes(algo);
   return {
     expanded: algo._expandedCount,
     generated: algo._generatedCount,
@@ -968,6 +1037,8 @@ function getStats(algo, isLSB){
     archiveSize: isLSB ? algo.archive.length : null,
     parkedCount: isLSB ? algo.parked.length : null,
     skippedBlocked: isLSB ? algo.skippedBlocked : null,
+    memBytes: memBytes,
+    liveBranches: isLSB ? (algo.branches.length + algo.parked.length + algo.archive.length) : null,
     algMs: algo.algMs,
     isLSB: isLSB
   };
@@ -1111,6 +1182,9 @@ function fmtStats(stats){
   s += 'path: <b>' + (stats.pathLen !== null ? stats.pathLen : '-') + '</b>';
   if(stats.done) s += stats.pathValid ? ' <span style="color:#6f6">valid</span>' : ' <span style="color:#f88">invalid</span>';
   s += '<br>frontier: <b>' + stats.frontier + '</b><br>';
+  s += '<span class="mem">memory ~ <b>' + fmtBytes(stats.memBytes) + '</b></span>';
+  if(stats.liveBranches !== null) s += ' <span class="mem">(' + stats.liveBranches + ' live branches)</span>';
+  s += '<br>';
   if(stats.isLSB){
     s += 'bt: <b>' + stats.backtracks + '</b>  parks: <b>' + stats.parks + '</b>  res: <b>' + stats.resumes + '</b><br>';
     s += 'kills: <b>' + stats.kills + '</b>  parked: <b>' + stats.parkedCount + '</b>  skipB: <b>' + stats.skippedBlocked + '</b><br>';
@@ -1152,7 +1226,7 @@ function setSpeed(s){
 
 function setSize(w, h){
   W = w; H = h;
-  CELL = Math.max(2, Math.floor(600 / W));
+  CELL = Math.max(1, Math.floor(600 / W));
   cA.width = W * CELL; cA.height = H * CELL;
   cL.width = W * CELL; cL.height = H * CELL;
   var btns = document.querySelectorAll('.size-btn');
@@ -1238,15 +1312,15 @@ function loop(now){
 }
 
 // =============== mass test ===============
-var MASS_N = 12;
 var MASS_MIN_TIME_MS = 5;
 var MASS_MAX_REPS = 30;
 var lastSeeds = null;
+var lastN = 0;
 
 function runOneOnce(factory, isLSB){
   var algo = factory();
   var iters = 0;
-  while(!algo.done && iters < 60000){ algo.step(MASS_BUDGET); iters++; }
+  while(!algo.done && iters < MASS_MAX_ITERS){ algo.step(MASS_BUDGET); iters++; }
   var s = getStats(algo, isLSB);
   return { stats: s, algMs: algo.algMs };
 }
@@ -1260,26 +1334,31 @@ function runBench(factory, isLSB){
   return { stats: last.stats, avgMs: totalMs / reps, reps: reps };
 }
 
-function massTest(reuse){
+function massTest(reuse, N){
+  N = N || 12;
   paused = true;
   document.getElementById('pauseBtn').innerText = 'Resume';
   var out = document.getElementById('results');
   out.style.display = 'block';
-  out.textContent = 'Running ' + MASS_N + ' mazes...';
+  out.textContent = 'Running ' + N + ' mazes...';
   setTimeout(function(){
     var plans;
-    if(reuse && lastSeeds){ plans = lastSeeds.slice(); }
+    if(reuse && lastSeeds && lastN === N){ plans = lastSeeds.slice(); }
     else {
       plans = [];
-      for(var i=0; i<MASS_N; i++){
+      for(var i=0; i<N; i++){
         var t = MAZE_TYPES[i % MAZE_TYPES.length];
         plans.push({ type: t.name, fn: t.fn, seed: freshSeed() });
       }
       lastSeeds = plans;
+      lastN = N;
     }
     var rows = [];
     var aSuccess = 0, lSuccess = 0, aWins = 0, lWins = 0, ties = 0;
-    var acc = { aTime:0, lTime:0, aExp:0, lExp:0, aPath:0, lPath:0, lBT:0, lParks:0, lRes:0, lKills:0, lED:0, lCuts:0, lPruned:0, lCutKill:0, lChecks:0, lGate:0, lArch:0, lReviv:0, lSkip:0, n:0 };
+    var acc = { aTime:0, lTime:0, aExp:0, lExp:0, aPath:0, lPath:0,
+                aMem:0, lMem:0,
+                lBT:0, lParks:0, lRes:0, lKills:0, lED:0, lCuts:0, lPruned:0,
+                lCutKill:0, lChecks:0, lGate:0, lArch:0, lReviv:0, lSkip:0, n:0 };
     for(var pi=0; pi<plans.length; pi++){
       var plan = plans[pi];
       var g = plan.fn(plan.seed);
@@ -1300,6 +1379,7 @@ function massTest(reuse){
         acc.aTime += ra.avgMs; acc.lTime += rl.avgMs;
         acc.aExp += ra.stats.expanded; acc.lExp += rl.stats.expanded;
         acc.aPath += ra.stats.pathLen || 0; acc.lPath += rl.stats.pathLen || 0;
+        acc.aMem += ra.stats.memBytes; acc.lMem += rl.stats.memBytes;
         acc.lBT += rl.stats.backtracks || 0; acc.lParks += rl.stats.parks || 0;
         acc.lRes += rl.stats.resumes || 0; acc.lKills += rl.stats.kills || 0;
         acc.lED += rl.stats.earlyDeaths || 0;
@@ -1319,6 +1399,8 @@ function massTest(reuse){
         aReps: ra.reps, lReps: rl.reps,
         aExp: ra.stats.expanded, lExp: rl.stats.expanded,
         aPath: ra.stats.pathLen, lPath: rl.stats.pathLen,
+        aMem: ra.stats.memBytes, lMem: rl.stats.memBytes,
+        lLive: rl.stats.liveBranches,
         aSuccess: aOk, lSuccess: lOk, lReason: rl.stats.pathReason,
         lBT: rl.stats.backtracks, lParks: rl.stats.parks, lRes: rl.stats.resumes, lKills: rl.stats.kills,
         lED: rl.stats.earlyDeaths, lCuts: rl.stats.cutsMade, lPruned: rl.stats.cutCellsPruned,
@@ -1329,84 +1411,104 @@ function massTest(reuse){
     }
     function pad(s, n){ s = String(s); while(s.length < n) s += ' '; return s.slice(0, n); }
     function padL(s, n){ s = String(s); while(s.length < n) s = ' ' + s; return s.slice(-n); }
+    function fmtBytesShort(b){
+      if(b < 1024) return b + 'B';
+      if(b < 1024*1024) return (b/1024).toFixed(0) + 'K';
+      return (b/1024/1024).toFixed(1) + 'M';
+    }
     var txt = '';
-    txt += 'MASS TEST - ' + MASS_N + ' mazes (' + W + 'x' + H + ')' + (reuse ? '  [reused]' : '  [fresh]') + '\n';
-    txt += 'Verdict by expanded-cells. Success requires validated path.\n\n';
+    txt += 'MASS TEST - ' + N + ' mazes (' + W + 'x' + H + ')' + (reuse && lastN === N ? '  [reused]' : '  [fresh]') + '\n';
+    txt += 'Verdict by expanded-cells. Success requires validated path.\n';
+    txt += 'Memory is a rough estimate (typed arrays exact; JS objects estimated).\n\n';
     txt += pad('type', 9) + padL('seed', 12) + padL('A*t', 10) + padL('LSBt', 10)
-         + padL('A*exp', 8) + padL('LSBexp', 9) + padL('A*pth', 7) + padL('LSBpth', 8)
-         + padL('ok', 4) + padL('rep', 7) + padL('LSBbt', 8) + padL('park', 6) + padL('res', 5) + padL('kill', 6)
-         + padL('eDead', 7) + padL('chk', 5) + padL('cuts', 6) + padL('prune', 7) + padL('cKill', 7)
-         + padL('arch', 6) + padL('rev', 5) + padL('skipB', 6)
+         + padL('A*exp', 7) + padL('LSBexp', 8) + padL('A*mem', 7) + padL('LSBmem', 8)
+         + padL('A*pth', 7) + padL('LSBpth', 8)
+         + padL('ok', 4) + padL('rep', 7)
+         + padL('LSBbt', 7) + padL('park', 5) + padL('kill', 5)
+         + padL('eDead', 6) + padL('chk', 4) + padL('cuts', 5) + padL('prune', 6) + padL('cKill', 6)
+         + padL('arch', 5) + padL('rev', 4) + padL('skipB', 6)
          + '  verdict\n';
-    txt += '-------------------------------------------------------------------------------------------------------------------------------------------------------------\n';
+    txt += '-----------------------------------------------------------------------------------------------------------------------------------------------------------\n';
     for(var ri=0; ri<rows.length; ri++){
       var r = rows[ri];
       txt += pad(r.type, 9) + padL(r.seed.toString(16), 12)
           + padL(fmtTime(r.aTime), 10) + padL(fmtTime(r.lTime), 10)
-          + padL(r.aExp, 8) + padL(r.lExp, 9)
+          + padL(r.aExp, 7) + padL(r.lExp, 8)
+          + padL(fmtBytesShort(r.aMem), 7) + padL(fmtBytesShort(r.lMem), 8)
           + padL(r.aPath === null ? '-' : r.aPath, 7) + padL(r.lPath === null ? '-' : r.lPath, 8)
           + padL(r.aSuccess && r.lSuccess ? 'Y/Y' : (r.aSuccess ? 'Y/N' : 'N/N'), 4)
           + padL(r.aReps + '/' + r.lReps, 7)
-          + padL(r.lBT === null ? '-' : r.lBT, 8) + padL(r.lParks === null ? '-' : r.lParks, 6)
-          + padL(r.lRes === null ? '-' : r.lRes, 5) + padL(r.lKills === null ? '-' : r.lKills, 6)
-          + padL(r.lED === null ? '-' : r.lED, 7)
-          + padL(r.lChecks === null ? '-' : r.lChecks, 5)
-          + padL(r.lCuts === null ? '-' : r.lCuts, 6)
-          + padL(r.lPruned === null ? '-' : r.lPruned, 7)
-          + padL(r.lCutKill === null ? '-' : r.lCutKill, 7)
-          + padL(r.lArch === null ? '-' : r.lArch, 6)
-          + padL(r.lReviv === null ? '-' : r.lReviv, 5)
+          + padL(r.lBT === null ? '-' : r.lBT, 7) + padL(r.lParks === null ? '-' : r.lParks, 5)
+          + padL(r.lKills === null ? '-' : r.lKills, 5)
+          + padL(r.lED === null ? '-' : r.lED, 6)
+          + padL(r.lChecks === null ? '-' : r.lChecks, 4)
+          + padL(r.lCuts === null ? '-' : r.lCuts, 5)
+          + padL(r.lPruned === null ? '-' : r.lPruned, 6)
+          + padL(r.lCutKill === null ? '-' : r.lCutKill, 6)
+          + padL(r.lArch === null ? '-' : r.lArch, 5)
+          + padL(r.lReviv === null ? '-' : r.lReviv, 4)
           + padL(r.lSkip === null ? '-' : r.lSkip, 6)
           + '  ' + r.verdict + '\n';
       if(!r.lSuccess && r.lReason && r.lReason !== 'no path') txt += '  LSB path invalid: ' + r.lReason + '\n';
     }
-    txt += '-------------------------------------------------------------------------------------------------------------------------------------------------------------\n';
+    txt += '-----------------------------------------------------------------------------------------------------------------------------------------------------------\n';
     if(acc.n > 0){
       txt += pad('AVG', 9) + padL('', 12)
           + padL(fmtTime(acc.aTime/acc.n), 10) + padL(fmtTime(acc.lTime/acc.n), 10)
-          + padL(Math.round(acc.aExp/acc.n), 8) + padL(Math.round(acc.lExp/acc.n), 9)
+          + padL(Math.round(acc.aExp/acc.n), 7) + padL(Math.round(acc.lExp/acc.n), 8)
+          + padL(fmtBytesShort(acc.aMem/acc.n), 7) + padL(fmtBytesShort(acc.lMem/acc.n), 8)
           + padL(Math.round(acc.aPath/acc.n), 7) + padL(Math.round(acc.lPath/acc.n), 8)
           + padL('', 4) + padL('', 7)
-          + padL(Math.round(acc.lBT/acc.n), 8) + padL(Math.round(acc.lParks/acc.n), 6)
-          + padL(Math.round(acc.lRes/acc.n), 5) + padL(Math.round(acc.lKills/acc.n), 6)
-          + padL(Math.round(acc.lED/acc.n), 7)
-          + padL(Math.round(acc.lChecks/acc.n), 5)
-          + padL(Math.round(acc.lCuts/acc.n), 6)
-          + padL(Math.round(acc.lPruned/acc.n), 7)
-          + padL(Math.round(acc.lCutKill/acc.n), 7)
-          + padL(Math.round(acc.lArch/acc.n), 6)
-          + padL(Math.round(acc.lReviv/acc.n), 5)
+          + padL(Math.round(acc.lBT/acc.n), 7) + padL(Math.round(acc.lParks/acc.n), 5)
+          + padL(Math.round(acc.lKills/acc.n), 5)
+          + padL(Math.round(acc.lED/acc.n), 6)
+          + padL(Math.round(acc.lChecks/acc.n), 4)
+          + padL(Math.round(acc.lCuts/acc.n), 5)
+          + padL(Math.round(acc.lPruned/acc.n), 6)
+          + padL(Math.round(acc.lCutKill/acc.n), 6)
+          + padL(Math.round(acc.lArch/acc.n), 5)
+          + padL(Math.round(acc.lReviv/acc.n), 4)
           + padL(Math.round(acc.lSkip/acc.n), 6)
           + '  (n=' + acc.n + ')\n';
     }
-    txt += '\nSUCCESS  A*: ' + aSuccess + '/' + MASS_N + '   LSB: ' + lSuccess + '/' + MASS_N + '\n';
+    txt += '\nSUCCESS  A*: ' + aSuccess + '/' + N + '   LSB: ' + lSuccess + '/' + N + '\n';
     txt += 'WINS  A*: ' + aWins + '   LSB: ' + lWins + '   tie: ' + ties + '\n\n';
-    txt += 'Per-type breakdown (both solved):\n';
+    txt += 'MEMORY (avg over successful runs):\n';
+    if(acc.n > 0){
+      var ratio = acc.aMem > 0 ? (acc.lMem / acc.aMem) : 0;
+      txt += '  A*  avg ' + fmtBytes(acc.aMem/acc.n) + '\n';
+      txt += '  LSB avg ' + fmtBytes(acc.lMem/acc.n) + '   (LSB/A* ratio = ' + ratio.toFixed(2) + 'x)\n';
+    }
+    txt += '\nPer-type breakdown (both solved):\n';
     for(var mi=0; mi<MAZE_TYPES.length; mi++){
       var t2 = MAZE_TYPES[mi];
       var sub = [];
       for(var si=0; si<rows.length; si++)
         if(rows[si].type === t2.name && rows[si].aSuccess && rows[si].lSuccess) sub.push(rows[si]);
       if(sub.length === 0){ txt += '  ' + pad(t2.name, 9) + '  (none)\n'; continue; }
-      var aAvgSum = 0, lAvgSum = 0, lBTSum = 0, lEDSum = 0, lCutsSum = 0, lPrunedSum = 0, lCutKillSum = 0, lChecksSum = 0, lArchSum = 0, lRevivSum = 0, lSkipSum = 0;
+      var aAvgSum = 0, lAvgSum = 0, lBTSum = 0, lEDSum = 0, lCutsSum = 0, lPrunedSum = 0,
+          lChecksSum = 0, lArchSum = 0, lRevivSum = 0, lSkipSum = 0, lMemSum = 0, aMemSum = 0;
       for(var xi=0; xi<sub.length; xi++){
         aAvgSum += sub[xi].aExp; lAvgSum += sub[xi].lExp;
+        aMemSum += sub[xi].aMem; lMemSum += sub[xi].lMem;
         lBTSum += sub[xi].lBT || 0; lEDSum += sub[xi].lED || 0;
         lCutsSum += sub[xi].lCuts || 0; lPrunedSum += sub[xi].lPruned || 0;
-        lCutKillSum += sub[xi].lCutKill || 0; lChecksSum += sub[xi].lChecks || 0;
+        lChecksSum += sub[xi].lChecks || 0;
         lArchSum += sub[xi].lArch || 0; lRevivSum += sub[xi].lReviv || 0;
         lSkipSum += sub[xi].lSkip || 0;
       }
       txt += '  ' + pad(t2.name, 9) + '  A* exp ' + padL(Math.round(aAvgSum/sub.length), 7)
            + '   LSB exp ' + padL(Math.round(lAvgSum/sub.length), 7)
-           + '   bt ' + padL(Math.round(lBTSum/sub.length), 6)
-           + '   eDead ' + padL(Math.round(lEDSum/sub.length), 6)
-           + '   cuts ' + padL(Math.round(lCutsSum/sub.length), 5)
-           + '   pruned ' + padL(Math.round(lPrunedSum/sub.length), 6)
-           + '   cKill ' + padL(Math.round(lCutKillSum/sub.length), 6)
-           + '   arch ' + padL(Math.round(lArchSum/sub.length), 5)
+           + '   A*mem ' + padL(fmtBytesShort(aMemSum/sub.length), 6)
+           + '   LSBmem ' + padL(fmtBytesShort(lMemSum/sub.length), 6)
+           + '   bt ' + padL(Math.round(lBTSum/sub.length), 5)
+           + '   eDead ' + padL(Math.round(lEDSum/sub.length), 5)
+           + '   chk ' + padL(Math.round(lChecksSum/sub.length), 4)
+           + '   cuts ' + padL(Math.round(lCutsSum/sub.length), 4)
+           + '   pruned ' + padL(Math.round(lPrunedSum/sub.length), 5)
+           + '   arch ' + padL(Math.round(lArchSum/sub.length), 4)
            + '   rev ' + padL(Math.round(lRevivSum/sub.length), 4)
-           + '   skipB ' + padL(Math.round(lSkipSum/sub.length), 6)
+           + '   skipB ' + padL(Math.round(lSkipSum/sub.length), 5)
            + '   n=' + sub.length + '\n';
     }
     out.textContent = txt;
