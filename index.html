@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LSB vs A* vs DFS</title>
+<title>LSB vs A* vs DFS vs SCS</title>
 <style>
   body { background:#111; color:#eee; font-family: monospace; margin:0; padding:12px; }
   h2 { margin: 4px 0; font-size: 15px; }
@@ -59,11 +59,11 @@
 <div class="panel" style="margin-bottom:8px;">
   <span style="color:#888;font-size:12px;margin-right:6px;">Left:</span>
   <select id="leftSel" onchange="changeAlgo('left', this.value)">
-    <option selected>A*</option><option>LSB</option><option>DFS</option>
+    <option selected>A*</option><option>LSB</option><option>DFS</option><option>SCS</option>
   </select>
   <span style="color:#888;font-size:12px;margin:0 8px 0 16px;">Right:</span>
   <select id="rightSel" onchange="changeAlgo('right', this.value)">
-    <option>A*</option><option selected>LSB</option><option>DFS</option>
+    <option>A*</option><option selected>LSB</option><option>DFS</option><option>SCS</option>
   </select>
 </div>
 
@@ -122,6 +122,8 @@ var FORK_COOLDOWN = 4;
 var REVIVE_DEADEND_THRESHOLD = 150;
 var REVIVE_BATCH = 6;
 var MAX_ARCHIVE = 500;
+
+var SCS_CUT_INTERVAL = 200;
 
 var LEFT_ALGO = 'A*';
 var RIGHT_ALGO = 'LSB';
@@ -346,13 +348,13 @@ function AStar(g, start, goal){
   this.W = g[0].length; this.H = g.length;
   var W = this.W;
   var k0 = start[1]*W + start[0];
-  this.k0 = k0;
   this.open = new MinHeap();
   this.open.push([manhattan(start,goal), 0, start]);
   this.gMap = {}; this.gMap[k0] = 0;
   this.came = {};
   this.closed = {};
   this.visited = {}; this.generated = {}; this.expanded = {}; this.frontier = {};
+  this.dead = {};
   this.visited[k0] = true; this.generated[k0] = true; this.frontier[k0] = true;
   this.done = false; this.exhausted = false; this.path = null; this.algMs = 0;
   this._visitedCount = 1; this._generatedCount = 1; this._expandedCount = 0; this._frontierCount = 1;
@@ -407,10 +409,10 @@ function DFS(g, start, goal){
   this.W = g[0].length; this.H = g.length;
   var W = this.W;
   var k0 = start[1]*W + start[0];
-  this.k0 = k0;
   this.stack = [start];
   this.came = {};
   this.visited = {}; this.generated = {}; this.expanded = {}; this.frontier = {};
+  this.dead = {};
   this.visited[k0] = true; this.generated[k0] = true; this.frontier[k0] = true;
   this.done = false; this.exhausted = false; this.path = null; this.algMs = 0;
   this._visitedCount = 1; this._generatedCount = 1; this._expandedCount = 0; this._frontierCount = 1;
@@ -455,34 +457,29 @@ DFS.prototype._recon = function(end){
   p.reverse(); this.path = p;
 };
 
-// =============== LSB (optimized: linked-list path, persistent stack) ===============
-// A branch's path is its `parent` chain. No path array to copy.
-// A branch's decision stack is its `topFrame` chain. Frames are immutable;
-// nextIdx advances via CoW so siblings stay independent.
-function LSBFrame(junctionNode, options, nextIdx, prev){
-  this.junctionNode = junctionNode;
-  this.options = options;
-  this.nextIdx = nextIdx;
-  this.prev = prev;
+// =============== LSB ===============
+function Branch(cell, path, cameFrom, W){
+  this.cell = cell; this.k = cell[1] * W + cell[0];
+  this.path = path.slice(); this.cameFrom = cameFrom; this.W = W;
+  this.stack = []; this.parked = false; this.scoreCache = 0;
+  this.depth = this.path.length - 1; this.lastForkDepth = -999;
 }
-function LSBBranch(cell, parent){
-  this.cell = cell;
-  this.k = cell[1] * W + cell[0];
-  this.parent = parent;
-  this.depth = parent ? parent.depth + 1 : 0;
-  this.topFrame = parent ? parent.topFrame : null;
-  this.parked = false;
-  this.scoreCache = 0;
-  this.lastForkDepth = parent ? parent.lastForkDepth : -999;
-}
+Branch.prototype.clone = function(){
+  var b = new Branch(this.cell, this.path, this.cameFrom, this.W || 0);
+  b.k = this.k; b.scoreCache = this.scoreCache; b.depth = this.depth; b.lastForkDepth = this.lastForkDepth;
+  for(var i=0; i<this.stack.length; i++){
+    var s = this.stack[i];
+    b.stack.push({ cell: s.cell, k: s.k, options: s.options.slice(), nextIdx: s.nextIdx, pathIdx: s.pathIdx });
+  }
+  return b;
+};
 
 function LSB(g, start, goal){
   this.kind = 'lsb';
   this.grid = g; this.start = start; this.goal = goal;
   this.W = g[0].length; this.H = g.length;
   var W = this.W, H = this.H;
-  var N = W * H;
-  this.N = N;
+  var N = W * H; this.N = N;
   var scale = Math.max(1, Math.floor((W*H) / 3000));
   this.max_branches = 16 * scale; this.max_parked = 100 * scale;
   this.scar_threshold = 2.5; this.scar_decay = 0.004; this.tryEps = 0.5;
@@ -494,8 +491,7 @@ function LSB(g, start, goal){
     var dy = y - gy; var base = y * W;
     for(var x=0; x<W; x++){ var dx = x - gx; dtg[base + x] = Math.sqrt(dx*dx + dy*dy); }
   }
-  this.dtg = dtg;
-  this.goalK = goal[1]*W + goal[0];
+  this.dtg = dtg; this.goalK = goal[1]*W + goal[0];
 
   var openCount = new Uint8Array(N);
   for(var yy=0; yy<H; yy++){
@@ -526,7 +522,6 @@ function LSB(g, start, goal){
   this.expanded = new Uint8Array(N); this.dead = new Uint8Array(N);
   this.blocked = new Uint8Array(N); this.cutDead = new Uint8Array(N);
   this.frontier = new Uint8Array(N);
-  this.frontierStamp = new Int32Array(N); this._frontierTick = 0;
   this.scar = new Float32Array(N); this.scarKeys = {};
 
   this._visitedCount = 0; this._generatedCount = 0; this._expandedCount = 0;
@@ -534,8 +529,7 @@ function LSB(g, start, goal){
   this._recording = false;
   this._deltaVisited = []; this._deltaFrontier = []; this._deltaFrontierRemoved = []; this._deltaDead = [];
   this._pathValid = undefined; this._pathReason = undefined;
-  this._reconPathCalls = 0;
-  this._scoreBuf = [];
+  this._reconPathCalls = 0; this._scoreBuf = [];
 
   this.vMinX = W; this.vMaxX = -1; this.vMinY = H; this.vMaxY = -1;
   this._frontierKeys = [];
@@ -547,12 +541,11 @@ function LSB(g, start, goal){
   this.vMinX = this.vMaxX = start[0];
   this.vMinY = this.vMaxY = start[1];
 
-  var b = new LSBBranch(start, null);
+  var b = new Branch(start, [start], null, W);
   b.scoreCache = dtg[b.k];
   this.branches = [b];
   this._frontierKeys = [b.k];
-  this.frontier[b.k] = 1;
-  this._frontierCount = 1;
+  this.frontier[b.k] = 1; this._frontierCount = 1;
 
   this.parked = []; this.archive = [];
   this.done = false; this.exhausted = false; this.path = null;
@@ -562,19 +555,17 @@ function LSB(g, start, goal){
   this.cutCheckTick = 0; this.lastCutCheckVisited = 0;
   this.cutsMade = 0; this.cutCellsPruned = 0; this.cutKilledBranches = 0;
   this.cutChecksRun = 0; this.cutGateSkips = 0; this.skippedBlocked = 0;
-  this.layerMedian = Infinity; this.parkedFull = false;
+  this.layerMedian = 0; this.parkedFull = false;
   this.algMs = 0;
 }
 
 LSB.prototype._reconPath = function(b){
   this._reconPathCalls++;
-  var arr = [];
-  var cur = b;
+  var arr = []; var cur = b;
   while(cur){ arr.push(cur.cell); cur = cur.parent; }
   arr.reverse();
   return arr;
 };
-
 LSB.prototype._addGenerated = function(k){
   if(!this.visited[k]){
     this.visited[k] = 1; this._visitedCount++;
@@ -613,7 +604,6 @@ LSB.prototype._reviveFromArchive = function(n){
 LSB.prototype._shouldPark = function(b){
   if(this.branches.length <= this.minActive) return false;
   if(this.parkedFull) return false;
-  if(this.layerMedian === Infinity) return false;
   return b.scoreCache > this.layerMedian * 1.5;
 };
 
@@ -625,14 +615,9 @@ LSB.prototype._checkForCuts = function(){
   if(!canV && !canH){ this.cutGateSkips++; return; }
   if(this._visitedCount - this.lastCutCheckVisited < CUT_MIN_VISITED_DELTA) return;
   this.lastCutCheckVisited = this._visitedCount;
-
   var parent = new Int32Array(N);
   for(var i=0; i<N; i++) parent[i] = i;
-  function find(x){
-    var r = x; while(parent[r] !== r) r = parent[r];
-    while(parent[x] !== r){ var nx = parent[x]; parent[x] = r; x = nx; }
-    return r;
-  }
+  function find(x){ var r = x; while(parent[r] !== r) r = parent[r]; while(parent[x] !== r){ var nx = parent[x]; parent[x] = r; x = nx; } return r; }
   function union(a, b){ var ra = find(a), rb = find(b); if(ra !== rb) parent[ra] = rb; }
   for(var y=0; y<H; y++){
     var base = y * W;
@@ -650,10 +635,7 @@ LSB.prototype._checkForCuts = function(){
       var r = find(kk);
       var bb = bbox[r];
       if(!bb){ bb = { minX: xx, maxX: xx, minY: yy, maxY: yy }; bbox[r] = bb; }
-      else {
-        if(xx < bb.minX) bb.minX = xx; if(xx > bb.maxX) bb.maxX = xx;
-        if(yy < bb.minY) bb.minY = yy; if(yy > bb.maxY) bb.maxY = yy;
-      }
+      else { if(xx < bb.minX) bb.minX = xx; if(xx > bb.maxX) bb.maxX = xx; if(yy < bb.minY) bb.minY = yy; if(yy > bb.maxY) bb.maxY = yy; }
     }
   }
   var cutRoots = {}, anyCut = false;
@@ -744,19 +726,14 @@ LSB.prototype.step = function(budget){
     var novelBefore = this._visitedCount;
     var oldBranches = this.branches;
     var ol = oldBranches.length;
-
     var needMedian = ol > this.minActive && this.parked.length < this.max_parked;
     if(needMedian){
-      var scores = this._scoreBuf;
-      scores.length = ol;
+      var scores = this._scoreBuf; scores.length = ol;
       for(var si=0; si<ol; si++) scores[si] = oldBranches[si].scoreCache;
       scores.sort(function(a,b){ return a - b; });
       this.layerMedian = scores[Math.floor(ol / 2)];
-    } else {
-      this.layerMedian = Infinity;
-    }
+    } else { this.layerMedian = Infinity; }
     this.parkedFull = this.parked.length >= this.max_parked;
-
     var next = [];
     var stop = false;
     for(var bi=0; bi<ol; bi++){
@@ -773,35 +750,28 @@ LSB.prototype.step = function(budget){
       if(this.parked.length < this.max_parked){ ob.parked = true; this.parked.push(ob); this.parks++; }
       else if(this.archive.length < MAX_ARCHIVE){ this.archive.push(ob); this.archived++; }
       else {
-        var cur2 = ob;
-        while(cur2){
-          this.scar[cur2.k] += 0.5; this.scarKeys[cur2.k] = 1; this._markDead(cur2.k);
-          cur2 = cur2.parent;
+        for(var pc=0; pc<ob.path.length; pc++){
+          var c = ob.path[pc]; var k = c[1]*W + c[0];
+          this.scar[k] += 0.5; this.scarKeys[k] = 1; this._markDead(k);
         }
         this.kills++;
       }
     }
-
-    // Timestamp frontier diff
-    this._frontierTick++;
-    var tick = this._frontierTick;
-    var newKeys = this._frontierKeys.slice();  // reuse & shrink
-    newKeys.length = this.branches.length;
-    for(var fj=0; fj<this.branches.length; fj++){
-      var kk = this.branches[fj].k;
-      newKeys[fj] = kk;
-      this.frontierStamp[kk] = tick;
-      if(!this.frontier[kk]){ this.frontier[kk] = 1; this._frontierCount++; if(rec) this._deltaFrontier.push(kk); }
+    var newKeys = new Array(this.branches.length);
+    for(var fj=0; fj<this.branches.length; fj++) newKeys[fj] = this.branches[fj].k;
+    var newSet = {};
+    for(var fj=0; fj<newKeys.length; fj++) newSet[newKeys[fj]] = 1;
+    var oldSet = {};
+    for(var fi=0; fi<this._frontierKeys.length; fi++) oldSet[this._frontierKeys[fi]] = 1;
+    for(var fi=0; fi<this._frontierKeys.length; fi++){
+      var kk = this._frontierKeys[fi];
+      if(!newSet[kk] && this.frontier[kk]){ this.frontier[kk] = 0; this._frontierCount--; if(rec) this._deltaFrontierRemoved.push(kk); }
     }
-    var oldKeys = this._frontierKeys;
-    for(var fi=0; fi<oldKeys.length; fi++){
-      var kk = oldKeys[fi];
-      if(this.frontierStamp[kk] !== tick){
-        if(this.frontier[kk]){ this.frontier[kk] = 0; this._frontierCount--; if(rec) this._deltaFrontierRemoved.push(kk); }
-      }
+    for(var fj=0; fj<newKeys.length; fj++){
+      var kk = newKeys[fj];
+      if(!oldSet[kk] && !this.frontier[kk]){ this.frontier[kk] = 1; this._frontierCount++; if(rec) this._deltaFrontier.push(kk); }
     }
     this._frontierKeys = newKeys;
-
     var novelAfter = this._visitedCount;
     if(novelAfter > novelBefore){ this.lastNovelTick = this.tick; this.deadEndStreak = 0; }
     else this.deadEndStreak++;
@@ -831,7 +801,7 @@ LSB.prototype.step = function(budget){
 
 LSB.prototype.stepBranch = function(b, next){
   var W = this.W, H = this.H;
-  if(b.k === this.goalK){ this.done = true; this.path = this._reconPath(b); return; }
+  if(b.k === this.goalK){ this.done = true; this.path = b.path; return; }
   if(!this.expanded[b.k]){ this.expanded[b.k] = 1; this._expandedCount++; }
   var x0 = b.cell[0], y0 = b.cell[1];
   var grid = this.grid, openCount = this.openCount, blocked = this.blocked, goalK = this.goalK;
@@ -851,8 +821,8 @@ LSB.prototype.stepBranch = function(b, next){
     opts.push([nx, ny, kk]);
   }
   if(opts.length === 0){
-    var replacement = this.backtrack(b);
-    if(replacement) next.push(replacement);
+    if(this.backtrack(b, next)) return;
+    next.push(b);
     return;
   }
   var dtg = this.dtg;
@@ -863,73 +833,342 @@ LSB.prototype.stepBranch = function(b, next){
     var bestD = dtg[primary[2]], tiedCount = 1;
     for(var ti=1; ti<opts.length; ti++) if(Math.abs(dtg[opts[ti][2]] - bestD) < this.tryEps) tiedCount++;
     if(tiedCount > 1){
-      var oldTop = b.topFrame;
       var wrote = 1;
       for(var k2=1; k2<opts.length && wrote<tiedCount; k2++){
         if(Math.abs(dtg[opts[k2][2]] - bestD) >= this.tryEps) continue;
+        var nb = b.clone();
         var nt = opts[k2];
-        var nb = new LSBBranch([nt[0], nt[1]], b);
-        nb.topFrame = new LSBFrame(b, opts, tiedCount, oldTop);
-        nb.lastForkDepth = nb.depth;
+        nb.stack.push({ cell: b.cell, k: b.k, options: opts.slice(), nextIdx: tiedCount, pathIdx: b.path.length - 1 });
+        nb.path.push(nt); nb.cameFrom = b.cell;
+        nb.cell = nt; nb.k = nt[2];
+        nb.depth = b.depth + 1; nb.lastForkDepth = nb.depth;
         nb.scoreCache = dtg[nt[2]] + 0.25 * nb.depth;
         this._addGenerated(nt[2]);
-        next.push(nb);
-        wrote++;
+        next.push(nb); wrote++;
       }
-      b.topFrame = new LSBFrame(b, opts, tiedCount, oldTop);
+      b.stack.push({ cell: b.cell, k: b.k, options: opts, nextIdx: tiedCount, pathIdx: b.path.length - 1 });
       b.lastForkDepth = b.depth;
     } else {
-      b.topFrame = new LSBFrame(b, opts, 1, b.topFrame);
+      b.stack.push({ cell: b.cell, k: b.k, options: opts, nextIdx: 1, pathIdx: b.path.length - 1 });
     }
   } else if(opts.length > 1){
-    b.topFrame = new LSBFrame(b, opts, 1, b.topFrame);
+    b.stack.push({ cell: b.cell, k: b.k, options: opts, nextIdx: 1, pathIdx: b.path.length - 1 });
   }
-
-  var newB = new LSBBranch([primary[0], primary[1]], b);
-  newB.scoreCache = dtg[primary[2]] + 0.25 * newB.depth;
+  b.path.push(primary);
+  b.cameFrom = b.cell;
+  b.cell = primary; b.k = primary[2];
+  b.depth++;
+  b.scoreCache = dtg[primary[2]] + 0.25 * b.depth;
   this._addGenerated(primary[2]);
-
-  if(newB.k === this.goalK){ this.done = true; this.path = this._reconPath(newB); return; }
-
-  if(this._shouldPark(newB)){
+  if(b.k === this.goalK){ this.done = true; this.path = b.path; return; }
+  if(this._shouldPark(b)){
     if(this.parked.length < this.max_parked){
-      newB.parked = true; this.parked.push(newB); this.parks++;
+      b.parked = true; this.parked.push(b); this.parks++;
       return;
     }
   }
-  next.push(newB);
+  next.push(b);
 };
 
-// Returns a NEW branch continuing from a junction, or null if exhausted.
-LSB.prototype.backtrack = function(b){
-  var blocked = this.blocked, goalK = this.goalK;
+LSB.prototype.backtrack = function(b, next){
+  var W = this.W, blocked = this.blocked, goalK = this.goalK;
   this.backtracks++;
   this.deadEndStreak++;
-  var top = b.topFrame;
-  while(top){
+  while(b.stack.length > 0){
+    var top = b.stack[b.stack.length - 1];
     if(top.nextIdx < top.options.length){
-      var nt = top.options[top.nextIdx];
-      // CoW advance: new frame with nextIdx+1
-      var newTop = new LSBFrame(top.junctionNode, top.options, top.nextIdx + 1, top.prev);
-      if(blocked[nt[2]] && nt[2] !== goalK){ this.skippedBlocked++; top = newTop; continue; }
-      var nb = new LSBBranch([nt[0], nt[1]], top.junctionNode);
-      nb.topFrame = newTop;
-      nb.lastForkDepth = top.junctionNode.lastForkDepth;
-      nb.scoreCache = this.dtg[nt[2]] + 0.25 * nb.depth;
+      var nt = top.options[top.nextIdx]; top.nextIdx++;
+      if(blocked[nt[2]] && nt[2] !== goalK){ this.skippedBlocked++; continue; }
+      b.path.length = top.pathIdx + 1; b.path.push(nt);
+      b.cameFrom = top.cell;
+      b.cell = nt; b.k = nt[2];
+      b.depth = b.path.length - 1;
+      b.scoreCache = this.dtg[nt[2]] + 0.25 * b.depth;
       this._addGenerated(nt[2]);
-      if(nb.k === goalK){ this.done = true; this.path = this._reconPath(nb); return null; }
-      return nb;
+      if(b.k === goalK){ this.done = true; this.path = b.path; return false; }
+      return false;
     }
-    top = top.prev;
+    b.stack.pop();
   }
-  // Exhausted: scar path, kill.
-  var cur = b;
-  while(cur){
-    this.scar[cur.k] += 0.5; this.scarKeys[cur.k] = 1; this._markDead(cur.k);
-    cur = cur.parent;
+  for(var j=0; j<b.path.length; j++){
+    var c2 = b.path[j]; var k2 = c2[1]*W + c2[0];
+    this.scar[k2] += 0.5; this.scarKeys[k2] = 1; this._markDead(k2);
   }
   this.kills++;
-  return null;
+  return true;
+};
+
+// =============== SCS: Bidirectional A* with mutual cuts ===============
+// Two A* searches, one from start (F) and one from goal (B).
+// Each side periodically asks: "which cells can't reach the OTHER endpoint
+// without crossing my own closed set?" Those cells are useless for me to
+// expand, so I seal them. The side effect is that the goal-side cut
+// literally boxes in the goal, and the forward search only needs to reach
+// the box boundary to finish.
+function SCS(g, start, goal){
+  this.kind = 'scs';
+  this.grid = g; this.start = start; this.goal = goal;
+  this.W = g[0].length; this.H = g.length;
+  var W = this.W, H = this.H, N = W*H;
+  this.N = N;
+
+  var openMinX = W, openMaxX = -1, openMinY = H, openMaxY = -1;
+  for(var oy=0; oy<H; oy++) for(var ox=0; ox<W; ox++){
+    if(g[oy][ox] === 0){
+      if(ox < openMinX) openMinX = ox; if(ox > openMaxX) openMaxX = ox;
+      if(oy < openMinY) openMinY = oy; if(oy > openMaxY) openMaxY = oy;
+    }
+  }
+  this.openMinX = openMinX; this.openMaxX = openMaxX;
+  this.openMinY = openMinY; this.openMaxY = openMaxY;
+
+  var sk = start[1]*W + start[0];
+  var gk = goal[1]*W + goal[0];
+  this.sk = sk; this.gk = gk;
+
+  // Forward state
+  this.openF = new MinHeap();
+  this.openF.push([manhattan(start, goal), 0, start]);
+  this.gF = new Map(); this.gF.set(sk, 0);
+  this.cameF = new Map();
+  this.closedF = new Uint8Array(N);
+  this.sealedF = new Uint8Array(N);
+  this.fVisited = new Uint8Array(N);
+  this.fVisited[sk] = 1;
+
+  // Backward state
+  this.openB = new MinHeap();
+  this.openB.push([manhattan(goal, start), 0, goal]);
+  this.gB = new Map(); this.gB.set(gk, 0);
+  this.cameB = new Map();
+  this.closedB = new Uint8Array(N);
+  this.sealedB = new Uint8Array(N);
+  this.bVisited = new Uint8Array(N);
+  this.bVisited[gk] = 1;
+
+  // Shared display state
+  this.visited = new Uint8Array(N); this.generated = new Uint8Array(N);
+  this.expanded = new Uint8Array(N); this.frontier = new Uint8Array(N);
+  this.dead = new Uint8Array(N);
+  this.visited[sk] = 1; this.visited[gk] = 1;
+  this.generated[sk] = 1; this.generated[gk] = 1;
+  this.frontier[sk] = 1; this.frontier[gk] = 1;
+
+  this.bestCost = Infinity;
+  this.bestMeet = null;
+  this.bestSide = null;
+
+  this.done = false; this.exhausted = false; this.path = null; this.algMs = 0;
+  this._visitedCount = 2; this._generatedCount = 2; this._expandedCount = 0;
+  this._frontierCount = 2;
+  this._recording = false;
+  this._deltaVisited = []; this._deltaFrontier = []; this._deltaFrontierRemoved = []; this._deltaDead = [];
+  this._pathValid = undefined; this._pathReason = undefined;
+
+  this.cutChecksRun = 0;
+  this.cutsF = 0; this.cutsB = 0;
+  this.cellsSealedF = 0; this.cellsSealedB = 0;
+  this.forwardExpanded = 0; this.backwardExpanded = 0;
+  this._sinceCut = 0;
+}
+
+SCS.prototype._reconFromSide = function(side, endCell){
+  var W = this.W, p = [], c = endCell;
+  if(side === 'F'){
+    while(c){ p.push(c); c = this.cameF.get(c[1]*W + c[0]); }
+    p.reverse();
+  } else {
+    while(c){ p.push(c); c = this.cameB.get(c[1]*W + c[0]); }
+  }
+  this.path = p;
+};
+
+SCS.prototype._reconMeet = function(){
+  var W = this.W, v = this.bestMeet;
+  if(!v) return;
+  var pathF = [];
+  var c = v;
+  while(c){ pathF.push(c); c = this.cameF.get(c[1]*W + c[0]); }
+  pathF.reverse();
+  var pathB = [];
+  c = v;
+  while(c){ pathB.push(c); c = this.cameB.get(c[1]*W + c[0]); }
+  this.path = pathF.concat(pathB.slice(1));
+};
+
+SCS.prototype._expandSide = function(side){
+  var W = this.W, H = this.H;
+  var g = this.grid, rec = this._recording;
+  var isF = side === 'F';
+  var open = isF ? this.openF : this.openB;
+  var closed = isF ? this.closedF : this.closedB;
+  var gMap = isF ? this.gF : this.gB;
+  var came = isF ? this.cameF : this.cameB;
+  var sealed = isF ? this.sealedF : this.sealedB;
+  var otherClosed = isF ? this.closedB : this.closedF;
+  var myVisited = isF ? this.fVisited : this.bVisited;
+  var target = isF ? this.goal : this.start;
+  var targetK = target[1]*W + target[0];
+
+  if(open.size === 0) return false;
+
+  var item = open.pop();
+  var gcost = item[1]; var c = item[2]; var kc = c[1]*W + c[0];
+  if(closed[kc]) return true;
+  if(sealed[kc]) return true;
+
+  closed[kc] = 1;
+  this.visited[kc] = 1; this.expanded[kc] = 1;
+  this._expandedCount++;
+  if(isF) this.forwardExpanded++; else this.backwardExpanded++;
+  if(this.frontier[kc]){ this.frontier[kc] = 0; this._frontierCount--; if(rec) this._deltaFrontierRemoved.push(kc); }
+
+  if(kc === targetK){
+    this.done = true;
+    this._reconFromSide(side, c);
+    return true;
+  }
+
+  if(otherClosed[kc]){
+    var myG = gMap.get(kc);
+    var otherG = (isF ? this.gB : this.gF).get(kc);
+    if(myG !== undefined && otherG !== undefined){
+      var cost = myG + otherG;
+      if(cost < this.bestCost){
+        this.bestCost = cost;
+        this.bestMeet = c;
+        this.bestSide = side;
+      }
+    }
+  }
+
+  for(var i=0; i<4; i++){
+    var nx = c[0] + N4[i][0], ny = c[1] + N4[i][1];
+    if(nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+    if(g[ny][nx] !== 0) continue;
+    var kn = ny * W + nx;
+    if(closed[kn]) continue;
+    if(sealed[kn]) continue;
+    if(this.dead[kn]) continue;
+    var ng = gcost + 1;
+    var cur = gMap.get(kn);
+    if(cur === undefined || ng < cur){
+      gMap.set(kn, ng);
+      came.set(kn, c);
+      open.push([ng + manhattan([nx, ny], target), ng, [nx, ny]]);
+      if(!this.frontier[kn]){ this.frontier[kn] = 1; this._frontierCount++; if(rec) this._deltaFrontier.push(kn); }
+      if(!this.generated[kn]){ this.generated[kn] = 1; this._generatedCount++; }
+      if(!myVisited[kn]){ myVisited[kn] = 1; if(!this.visited[kn]){ this.visited[kn] = 1; this._visitedCount++; if(rec) this._deltaVisited.push(kn); } }
+    }
+  }
+  return true;
+};
+
+SCS.prototype._checkCuts = function(){
+  var W = this.W, H = this.H, N = this.N;
+  this.cutChecksRun++;
+
+  // Forward cut: from goal, BFS avoiding closedF. Unreached cells can't
+  // reach goal without crossing cells F has already expanded -> useless
+  // for F to explore.
+  var reached = new Uint8Array(N);
+  var queue = new Int32Array(N);
+  var qh = 0, qt = 0;
+  queue[qt++] = this.gk; reached[this.gk] = 1;
+  while(qh < qt){
+    var kc = queue[qh++];
+    var cx = kc % W, cy = (kc - cx) / W;
+    for(var di=0; di<4; di++){
+      var nx = cx + N4[di][0], ny = cy + N4[di][1];
+      if(nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+      if(this.grid[ny][nx] !== 0) continue;
+      var nk = ny * W + nx;
+      if(reached[nk]) continue;
+      if(this.closedF[nk]) continue;
+      reached[nk] = 1;
+      queue[qt++] = nk;
+    }
+  }
+  var sealedF = 0;
+  for(var y=0; y<H; y++) for(var x=0; x<W; x++){
+    var k = y*W + x;
+    if(this.grid[y][x] !== 0) continue;
+    if(reached[k]) continue;
+    if(this.closedF[k]) continue;
+    if(this.sealedF[k]) continue;
+    this.sealedF[k] = 1;
+    sealedF++;
+  }
+  if(sealedF > 0){ this.cutsF++; this.cellsSealedF += sealedF; }
+
+  // Backward cut: symmetric.
+  reached = new Uint8Array(N);
+  queue = new Int32Array(N);
+  qh = 0; qt = 0;
+  queue[qt++] = this.sk; reached[this.sk] = 1;
+  while(qh < qt){
+    var kc2 = queue[qh++];
+    var cx2 = kc2 % W, cy2 = (kc2 - cx2) / W;
+    for(var di2=0; di2<4; di2++){
+      var nx2 = cx2 + N4[di2][0], ny2 = cy2 + N4[di2][1];
+      if(nx2 < 0 || nx2 >= W || ny2 < 0 || ny2 >= H) continue;
+      if(this.grid[ny2][nx2] !== 0) continue;
+      var nk2 = ny2 * W + nx2;
+      if(reached[nk2]) continue;
+      if(this.closedB[nk2]) continue;
+      reached[nk2] = 1;
+      queue[qt++] = nk2;
+    }
+  }
+  var sealedB = 0;
+  for(var y2=0; y2<H; y2++) for(var x2=0; x2<W; x2++){
+    var k2 = y2*W + x2;
+    if(this.grid[y2][x2] !== 0) continue;
+    if(reached[k2]) continue;
+    if(this.closedB[k2]) continue;
+    if(this.sealedB[k2]) continue;
+    this.sealedB[k2] = 1;
+    sealedB++;
+  }
+  if(sealedB > 0){ this.cutsB++; this.cellsSealedB += sealedB; }
+};
+
+SCS.prototype.step = function(budget){
+  var t0 = performance.now();
+  var rec = this._recording;
+  for(var i=0; i<budget && !this.done; i++){
+    var did = false;
+    if(this.openF.size > 0){ this._expandSide('F'); did = true; }
+    if(this.done) break;
+    if(this.openB.size > 0){ this._expandSide('B'); did = true; }
+    if(this.done) break;
+    if(!did){
+      this.done = true;
+      if(this.bestCost !== Infinity) this._reconMeet();
+      else this.exhausted = true;
+      break;
+    }
+  }
+
+  if(this.bestCost !== Infinity && !this.done){
+    var minF = this.openF.size > 0 ? this.openF.h[0][0] : Infinity;
+    var minB = this.openB.size > 0 ? this.openB.h[0][0] : Infinity;
+    var threshold;
+    if(minF === Infinity) threshold = minB;
+    else if(minB === Infinity) threshold = minF;
+    else threshold = Math.max(minF, minB);
+    if(this.bestCost <= threshold){
+      this.done = true;
+      this._reconMeet();
+    }
+  }
+
+  this._sinceCut += budget;
+  if(this._sinceCut >= SCS_CUT_INTERVAL && !this.done){
+    this._sinceCut = 0;
+    this._checkCuts();
+  }
+  this.algMs += performance.now() - t0;
 };
 
 // =============== memory estimation ===============
@@ -946,12 +1185,15 @@ function estimateLSBBytes(l){
   bytes += l.visited.byteLength + l.generated.byteLength + l.expanded.byteLength;
   bytes += l.dead.byteLength + l.blocked.byteLength + l.cutDead.byteLength;
   bytes += l.frontier.byteLength + l.scar.byteLength + l.dtg.byteLength + l.openCount.byteLength;
-  bytes += l.frontierStamp.byteLength;
   function branchBytes(b){
     var sz = BYTES_OBJ_HEADER + BYTES_SMALL_ARRAY;
-    sz += b.depth * BYTES_LSB_BRANCH;  // ancestor chain (over-estimated, shared)
-    var f = b.topFrame;
-    while(f){ sz += BYTES_LSB_FRAME; f = f.prev; }
+    sz += b.path.length * BYTES_PER_SMALL_ARRAY;
+    sz += BYTES_SMALL_ARRAY;
+    for(var si=0; si<b.stack.length; si++){
+      var s = b.stack[si];
+      sz += BYTES_LSB_FRAME;
+      sz += BYTES_SMALL_ARRAY + s.options.length * BYTES_PER_SMALL_ARRAY;
+    }
     return sz;
   }
   for(var bi=0; bi<l.branches.length; bi++) bytes += branchBytes(l.branches[bi]);
@@ -981,9 +1223,27 @@ function estimateDFSBytes(d){
   bytes += countObjEntries(d.frontier) * BYTES_OBJECT_MAP_ENTRY;
   return bytes;
 }
+function estimateSCSBytes(s){
+  var bytes = 0;
+  // Fixed arrays
+  bytes += s.closedF.byteLength + s.closedB.byteLength;
+  bytes += s.sealedF.byteLength + s.sealedB.byteLength;
+  bytes += s.fVisited.byteLength + s.bVisited.byteLength;
+  bytes += s.visited.byteLength + s.generated.byteLength + s.expanded.byteLength + s.frontier.byteLength + s.dead.byteLength;
+  // Open heaps
+  bytes += s.openF.h.length * (BYTES_SMALL_ARRAY + 3 * BYTES_PER_NUMBER + BYTES_PER_SMALL_ARRAY);
+  bytes += s.openB.h.length * (BYTES_SMALL_ARRAY + 3 * BYTES_PER_NUMBER + BYTES_PER_SMALL_ARRAY);
+  // Maps
+  bytes += s.gF.size * BYTES_OBJECT_MAP_ENTRY;
+  bytes += s.gB.size * BYTES_OBJECT_MAP_ENTRY;
+  bytes += s.cameF.size * (BYTES_OBJECT_MAP_ENTRY + BYTES_PER_SMALL_ARRAY);
+  bytes += s.cameB.size * (BYTES_OBJECT_MAP_ENTRY + BYTES_PER_SMALL_ARRAY);
+  return bytes;
+}
 function estimateBytes(algo){
   if(algo.kind === 'lsb') return estimateLSBBytes(algo);
   if(algo.kind === 'dfs') return estimateDFSBytes(algo);
+  if(algo.kind === 'scs') return estimateSCSBytes(algo);
   return estimateAStarBytes(algo);
 }
 
@@ -991,12 +1251,14 @@ function makeAlgo(kind, g, start, goal){
   if(kind === 'A*') return new AStar(g, start, goal);
   if(kind === 'LSB') return new LSB(g, start, goal);
   if(kind === 'DFS') return new DFS(g, start, goal);
+  if(kind === 'SCS') return new SCS(g, start, goal);
   throw new Error('unknown algo ' + kind);
 }
 
 // =============== stats ===============
 function getStats(algo){
   var isLSB = algo.kind === 'lsb';
+  var isSCS = algo.kind === 'scs';
   var validPath;
   if(!algo.path){
     validPath = { ok:false, reason:'no path' };
@@ -1006,29 +1268,34 @@ function getStats(algo){
     validPath = validatePath(algo.grid, algo.path, algo.start, algo.goal, algo.W, algo.H);
     algo._pathValid = validPath.ok; algo._pathReason = validPath.reason;
   }
-  return {
+  var stats = {
     expanded: algo._expandedCount, generated: algo._generatedCount,
     uniqueVisited: algo._visitedCount,
     pathLen: algo.path ? algo.path.length : null,
     pathValid: validPath.ok, pathReason: validPath.reason,
     success: algo.done && validPath.ok, exhausted: !!algo.exhausted, done: algo.done,
     frontier: algo._frontierCount,
-    backtracks: isLSB ? algo.backtracks : null,
-    parks: isLSB ? algo.parks : null, resumes: isLSB ? algo.resumes : null,
-    kills: isLSB ? algo.kills : null, earlyDeaths: isLSB ? algo.earlyDeaths : null,
-    cutsMade: isLSB ? algo.cutsMade : null, cutCellsPruned: isLSB ? algo.cutCellsPruned : null,
-    cutKilledBranches: isLSB ? algo.cutKilledBranches : null,
-    cutChecksRun: isLSB ? algo.cutChecksRun : null,
-    cutGateSkips: isLSB ? algo.cutGateSkips : null,
-    archived: isLSB ? algo.archived : null, revived: isLSB ? algo.revived : null,
-    archiveSize: isLSB ? algo.archive.length : null,
-    parkedCount: isLSB ? algo.parked.length : null,
-    skippedBlocked: isLSB ? algo.skippedBlocked : null,
-    reconPathCalls: isLSB ? algo._reconPathCalls : null,
     memBytes: estimateBytes(algo),
-    liveBranches: isLSB ? (algo.branches.length + algo.parked.length + algo.archive.length) : null,
-    algMs: algo.algMs, isLSB: isLSB
+    algMs: algo.algMs, isLSB: isLSB, isSCS: isSCS
   };
+  if(isLSB){
+    stats.backtracks = algo.backtracks; stats.parks = algo.parks; stats.resumes = algo.resumes;
+    stats.kills = algo.kills; stats.earlyDeaths = algo.earlyDeaths;
+    stats.cutsMade = algo.cutsMade; stats.cutCellsPruned = algo.cutCellsPruned;
+    stats.cutKilledBranches = algo.cutKilledBranches; stats.cutChecksRun = algo.cutChecksRun;
+    stats.cutGateSkips = algo.cutGateSkips; stats.archived = algo.archived; stats.revived = algo.revived;
+    stats.archiveSize = algo.archive.length; stats.parkedCount = algo.parked.length;
+    stats.skippedBlocked = algo.skippedBlocked; stats.reconPathCalls = algo._reconPathCalls;
+    stats.liveBranches = algo.branches.length + algo.parked.length + algo.archive.length;
+  }
+  if(isSCS){
+    stats.scsCutChecks = algo.cutChecksRun;
+    stats.scsCutsF = algo.cutsF; stats.scsCutsB = algo.cutsB;
+    stats.scsSealedF = algo.cellsSealedF; stats.scsSealedB = algo.cellsSealedB;
+    stats.scsFExpanded = algo.forwardExpanded; stats.scsBExpanded = algo.backwardExpanded;
+    stats.scsBestCost = algo.bestCost === Infinity ? null : algo.bestCost;
+  }
+  return stats;
 }
 
 // =============== recording ===============
@@ -1140,15 +1407,20 @@ function fmtStats(stats){
   if(stats.done) s += stats.pathValid ? ' <span style="color:#6f6">valid</span>' : ' <span style="color:#f88">invalid</span>';
   s += '<br>frontier: <b>' + stats.frontier + '</b><br>';
   s += '<span class="mem">memory ~ <b>' + fmtBytes(stats.memBytes) + '</b></span>';
-  if(stats.liveBranches !== null) s += ' <span class="mem">(' + stats.liveBranches + ' live branches)</span>';
+  if(stats.liveBranches !== null) s += ' <span class="mem">(' + stats.liveBranches + ' live)</span>';
   s += '<br>';
   if(stats.isLSB){
     s += 'bt: <b>' + stats.backtracks + '</b>  parks: <b>' + stats.parks + '</b>  res: <b>' + stats.resumes + '</b><br>';
     s += 'kills: <b>' + stats.kills + '</b>  parked: <b>' + stats.parkedCount + '</b>  skipB: <b>' + stats.skippedBlocked + '</b><br>';
-    s += 'early dead: <b>' + stats.earlyDeaths + '</b>  recon calls: <b>' + stats.reconPathCalls + '</b><br>';
-    s += 'archive: <b>' + stats.archiveSize + '</b>  archived: <b>' + stats.archived + '</b>  revived: <b>' + stats.revived + '</b><br>';
-    s += 'cuts: <b>' + stats.cutsMade + '</b>  checks: <b>' + stats.cutChecksRun + '</b>  gate-skips: <b>' + stats.cutGateSkips + '</b>  pruned: <b>' + stats.cutCellsPruned + '</b><br>';
-    s += 'cut-killed: <b>' + stats.cutKilledBranches + '</b><br>';
+    s += 'early dead: <b>' + stats.earlyDeaths + '</b>  recon: <b>' + stats.reconPathCalls + '</b><br>';
+    s += 'archive: <b>' + stats.archiveSize + '</b>  arch: <b>' + stats.archived + '</b>  rev: <b>' + stats.revived + '</b><br>';
+    s += 'cuts: <b>' + stats.cutsMade + '</b>  checks: <b>' + stats.cutChecksRun + '</b>  pruned: <b>' + stats.cutCellsPruned + '</b><br>';
+  }
+  if(stats.isSCS){
+    s += 'checks: <b>' + stats.scsCutChecks + '</b>  cutsF/B: <b>' + stats.scsCutsF + '/' + stats.scsCutsB + '</b><br>';
+    s += 'sealedF/B: <b>' + stats.scsSealedF + '/' + stats.scsSealedB + '</b><br>';
+    s += 'fExp/bExp: <b>' + stats.scsFExpanded + '/' + stats.scsBExpanded + '</b><br>';
+    s += 'best meet cost: <b>' + (stats.scsBestCost !== null ? stats.scsBestCost : '-') + '</b><br>';
   }
   s += 'done: <b>' + stats.done + '</b>';
   if(stats.exhausted) s += ' <span style="color:#f88">(exhausted)</span>';
@@ -1297,12 +1569,9 @@ function massTest(reuse, N){
       lastSeeds = plans; lastN = N;
     }
     var LKind = LEFT_ALGO, RKind = RIGHT_ALGO;
-    var lsbSide = (LKind === 'LSB') ? 'L' : (RKind === 'LSB' ? 'R' : null);
     var rows = [];
     var aSuccess = 0, lSuccess = 0, aWins = 0, lWins = 0, ties = 0;
-    var acc = { aTime:0, lTime:0, aExp:0, lExp:0, aPath:0, lPath:0, aMem:0, lMem:0,
-                lsbBT:0, lsbParks:0, lsbKills:0, lsbED:0, lsbCuts:0, lsbPruned:0,
-                lsbCutKill:0, lsbChecks:0, lsbArch:0, lsbReviv:0, lsbSkip:0, n:0 };
+    var acc = { aTime:0, lTime:0, aExp:0, lExp:0, aPath:0, lPath:0, aMem:0, lMem:0, n:0 };
     for(var pi=0; pi<plans.length; pi++){
       var plan = plans[pi];
       var g = plan.fn(plan.seed);
@@ -1319,20 +1588,11 @@ function massTest(reuse, N){
       else if(ra.stats.expanded < rl.stats.expanded){ verdict = LKind; aWins++; }
       else if(rl.stats.expanded < ra.stats.expanded){ verdict = RKind; lWins++; }
       else { verdict = 'tie'; ties++; }
-      var lsbStats = (lsbSide === 'L') ? ra.stats : (lsbSide === 'R' ? rl.stats : null);
       if(aOk && lOk){
         acc.aTime += ra.avgMs; acc.lTime += rl.avgMs;
         acc.aExp += ra.stats.expanded; acc.lExp += rl.stats.expanded;
         acc.aPath += ra.stats.pathLen || 0; acc.lPath += rl.stats.pathLen || 0;
         acc.aMem += ra.stats.memBytes; acc.lMem += rl.stats.memBytes;
-        if(lsbStats){
-          acc.lsbBT += lsbStats.backtracks || 0; acc.lsbParks += lsbStats.parks || 0;
-          acc.lsbKills += lsbStats.kills || 0; acc.lsbED += lsbStats.earlyDeaths || 0;
-          acc.lsbCuts += lsbStats.cutsMade || 0; acc.lsbPruned += lsbStats.cutCellsPruned || 0;
-          acc.lsbCutKill += lsbStats.cutKilledBranches || 0; acc.lsbChecks += lsbStats.cutChecksRun || 0;
-          acc.lsbArch += lsbStats.archived || 0; acc.lsbReviv += lsbStats.revived || 0;
-          acc.lsbSkip += lsbStats.skippedBlocked || 0;
-        }
         acc.n++;
       }
       rows.push({ type: plan.type, seed: plan.seed,
@@ -1340,8 +1600,7 @@ function massTest(reuse, N){
         aExp: ra.stats.expanded, lExp: rl.stats.expanded,
         aPath: ra.stats.pathLen, lPath: rl.stats.pathLen,
         aMem: ra.stats.memBytes, lMem: rl.stats.memBytes,
-        aSuccess: aOk, lSuccess: lOk, lReason: rl.stats.pathReason,
-        lsbStats: lsbStats, verdict: verdict });
+        aSuccess: aOk, lSuccess: lOk, lReason: rl.stats.pathReason, verdict: verdict });
     }
     function pad(s, n){ s = String(s); while(s.length < n) s += ' '; return s.slice(0, n); }
     function padL(s, n){ s = String(s); while(s.length < n) s = ' ' + s; return s.slice(-n); }
@@ -1354,12 +1613,9 @@ function massTest(reuse, N){
          + padL('Lexp', 7) + padL('Rexp', 7)
          + padL('Lmem', 7) + padL('Rmem', 7)
          + padL('Lpth', 7) + padL('Rpth', 7)
-         + padL('ok', 4) + padL('rep', 7);
-    if(lsbSide) txt += padL('bt', 6) + padL('park', 5) + padL('kill', 5) + padL('eD', 5)
-                     + padL('chk', 4) + padL('cuts', 5) + padL('prune', 6) + padL('cKill', 5)
-                     + padL('arch', 5) + padL('rev', 4) + padL('skipB', 6);
-    txt += '  verdict\n';
-    txt += '-----------------------------------------------------------------------------------------------------------\n';
+         + padL('ok', 4) + padL('rep', 7)
+         + '  verdict\n';
+    txt += '-------------------------------------------------------------------------------------------\n';
     for(var ri=0; ri<rows.length; ri++){
       var r = rows[ri];
       txt += pad(r.type, 9) + padL(r.seed.toString(16), 12)
@@ -1368,63 +1624,22 @@ function massTest(reuse, N){
           + padL(fmtBytesShort(r.aMem), 7) + padL(fmtBytesShort(r.lMem), 7)
           + padL(r.aPath === null ? '-' : r.aPath, 7) + padL(r.lPath === null ? '-' : r.lPath, 7)
           + padL(r.aSuccess && r.lSuccess ? 'Y/Y' : (r.aSuccess ? 'Y/N' : 'N/N'), 4)
-          + padL(r.aReps + '/' + r.lReps, 7);
-      if(lsbSide){
-        var ls = r.lsbStats;
-        txt += padL(ls ? ls.backtracks : '-', 6) + padL(ls ? ls.parks : '-', 5)
-             + padL(ls ? ls.kills : '-', 5) + padL(ls ? ls.earlyDeaths : '-', 5)
-             + padL(ls ? ls.cutChecksRun : '-', 4) + padL(ls ? ls.cutsMade : '-', 5)
-             + padL(ls ? ls.cutCellsPruned : '-', 6) + padL(ls ? ls.cutKilledBranches : '-', 5)
-             + padL(ls ? ls.archived : '-', 5) + padL(ls ? ls.revived : '-', 4)
-             + padL(ls ? ls.skippedBlocked : '-', 6);
-      }
-      txt += '  ' + r.verdict + '\n';
+          + padL(r.aReps + '/' + r.lReps, 7)
+          + '  ' + r.verdict + '\n';
       if(!r.lSuccess && r.lReason && r.lReason !== 'no path') txt += '  ' + RKind + ' path invalid: ' + r.lReason + '\n';
     }
-    txt += '-----------------------------------------------------------------------------------------------------------\n';
+    txt += '-------------------------------------------------------------------------------------------\n';
     if(acc.n > 0){
       txt += pad('AVG', 9) + padL('', 12)
           + padL(fmtTime(acc.aTime/acc.n), 10) + padL(fmtTime(acc.lTime/acc.n), 10)
           + padL(Math.round(acc.aExp/acc.n), 7) + padL(Math.round(acc.lExp/acc.n), 7)
           + padL(fmtBytesShort(acc.aMem/acc.n), 7) + padL(fmtBytesShort(acc.lMem/acc.n), 7)
           + padL(Math.round(acc.aPath/acc.n), 7) + padL(Math.round(acc.lPath/acc.n), 7)
-          + padL('', 4) + padL('', 7);
-      if(lsbSide){
-        txt += padL(Math.round(acc.lsbBT/acc.n), 6) + padL(Math.round(acc.lsbParks/acc.n), 5)
-             + padL(Math.round(acc.lsbKills/acc.n), 5) + padL(Math.round(acc.lsbED/acc.n), 5)
-             + padL(Math.round(acc.lsbChecks/acc.n), 4) + padL(Math.round(acc.lsbCuts/acc.n), 5)
-             + padL(Math.round(acc.lsbPruned/acc.n), 6) + padL(Math.round(acc.lsbCutKill/acc.n), 5)
-             + padL(Math.round(acc.lsbArch/acc.n), 5) + padL(Math.round(acc.lsbReviv/acc.n), 4)
-             + padL(Math.round(acc.lsbSkip/acc.n), 6);
-      }
-      txt += '  (n=' + acc.n + ')\n';
+          + padL('', 4) + padL('', 7)
+          + '  (n=' + acc.n + ')\n';
     }
     txt += '\nSUCCESS  ' + LKind + ': ' + aSuccess + '/' + N + '   ' + RKind + ': ' + lSuccess + '/' + N + '\n';
-    txt += 'WINS  ' + LKind + ': ' + aWins + '   ' + RKind + ': ' + lWins + '   tie: ' + ties + '\n\n';
-    if(acc.n > 0){
-      txt += 'MEMORY (avg over successful runs):\n';
-      txt += '  ' + LKind + ' avg ' + fmtBytes(acc.aMem/acc.n) + '\n';
-      txt += '  ' + RKind + ' avg ' + fmtBytes(acc.lMem/acc.n) + '   (R/L = ' + (acc.aMem > 0 ? (acc.lMem/acc.aMem).toFixed(2) : '0') + 'x)\n\n';
-    }
-    txt += 'Per-type breakdown (both solved):\n';
-    for(var mi=0; mi<MAZE_TYPES.length; mi++){
-      var t2 = MAZE_TYPES[mi];
-      var sub = [];
-      for(var si=0; si<rows.length; si++) if(rows[si].type === t2.name && rows[si].aSuccess && rows[si].lSuccess) sub.push(rows[si]);
-      if(sub.length === 0){ txt += '  ' + pad(t2.name, 9) + '  (none)\n'; continue; }
-      var aAvgSum = 0, lAvgSum = 0, aMemSum = 0, lMemSum = 0, lsbBTSum = 0, lsbCutsSum = 0;
-      for(var xi=0; xi<sub.length; xi++){
-        aAvgSum += sub[xi].aExp; lAvgSum += sub[xi].lExp;
-        aMemSum += sub[xi].aMem; lMemSum += sub[xi].lMem;
-        if(sub[xi].lsbStats){ lsbBTSum += sub[xi].lsbStats.backtracks || 0; lsbCutsSum += sub[xi].lsbStats.cutsMade || 0; }
-      }
-      txt += '  ' + pad(t2.name, 9) + '  ' + LKind + ' exp ' + padL(Math.round(aAvgSum/sub.length), 7)
-           + '   ' + RKind + ' exp ' + padL(Math.round(lAvgSum/sub.length), 7)
-           + '   ' + LKind + ' mem ' + padL(fmtBytesShort(aMemSum/sub.length), 6)
-           + '   ' + RKind + ' mem ' + padL(fmtBytesShort(lMemSum/sub.length), 6);
-      if(lsbSide) txt += '   bt ' + padL(Math.round(lsbBTSum/sub.length), 5) + '   cuts ' + padL(Math.round(lsbCutsSum/sub.length), 4);
-      txt += '   n=' + sub.length + '\n';
-    }
+    txt += 'WINS  ' + LKind + ': ' + aWins + '   ' + RKind + ': ' + lWins + '   tie: ' + ties + '\n';
     out.textContent = txt;
   }, 30);
 }
