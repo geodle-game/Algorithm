@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LSB vs A* vs DFS vs SCS</title>
+<title>LSB vs A* vs DFS vs SCS vs TSCS</title>
 <style>
   body { background:#111; color:#eee; font-family: monospace; margin:0; padding:12px; }
   h2 { margin: 4px 0; font-size: 15px; }
@@ -59,11 +59,11 @@
 <div class="panel" style="margin-bottom:8px;">
   <span style="color:#888;font-size:12px;margin-right:6px;">Left:</span>
   <select id="leftSel" onchange="changeAlgo('left', this.value)">
-    <option selected>A*</option><option>LSB</option><option>DFS</option><option>SCS</option>
+    <option selected>A*</option><option>LSB</option><option>DFS</option><option>SCS</option><option>TSCS</option>
   </select>
   <span style="color:#888;font-size:12px;margin:0 8px 0 16px;">Right:</span>
   <select id="rightSel" onchange="changeAlgo('right', this.value)">
-    <option>A*</option><option selected>LSB</option><option>DFS</option><option>SCS</option>
+    <option>A*</option><option>LSB</option><option>DFS</option><option>SCS</option><option selected>TSCS</option>
   </select>
 </div>
 
@@ -95,7 +95,7 @@
     <div class="meta" id="metaA"></div>
   </div>
   <div class="col panel">
-    <h2 id="hRight">LSB</h2>
+    <h2 id="hRight">TSCS</h2>
     <canvas id="cL"></canvas>
     <div class="stats" id="sL"></div>
     <div class="meta" id="metaL"></div>
@@ -124,25 +124,18 @@ var REVIVE_BATCH = 6;
 var MAX_ARCHIVE = 500;
 
 var SCS_CUT_INTERVAL = 200;
+var TSCS_TILE_SIZE = 10;
 
 var LEFT_ALGO = 'A*';
-var RIGHT_ALGO = 'LSB';
+var RIGHT_ALGO = 'TSCS';
 
 var START = [0, 0];
 var GOAL = [W-1, H-1];
 var grid = null;
 
-function rng(seed){
-  var s = seed >>> 0;
-  return function(){ s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
-}
+function rng(seed){ var s = seed >>> 0; return function(){ s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
 var seedCounter = 0;
-function freshSeed(){
-  seedCounter++;
-  var t = Date.now() >>> 0;
-  var r = Math.floor(Math.random() * 0xFFFFFFFF) >>> 0;
-  return (t ^ r ^ (seedCounter * 2654435761)) >>> 0;
-}
+function freshSeed(){ seedCounter++; var t = Date.now() >>> 0; var r = Math.floor(Math.random() * 0xFFFFFFFF) >>> 0; return (t ^ r ^ (seedCounter * 2654435761)) >>> 0; }
 
 function makeOpen(){
   var g = [];
@@ -270,12 +263,7 @@ function keysOf(obj){
   }
   return out;
 }
-function countObjEntries(o){
-  if(!o) return 0;
-  var n = 0;
-  for(var k in o) if(o[k]) n++;
-  return n;
-}
+function countObjEntries(o){ if(!o) return 0; var n = 0; for(var k in o) if(o[k]) n++; return n; }
 
 function validatePath(g, path, start, goal, W, H){
   if(!path || path.length === 0) return { ok:false, reason:'empty path' };
@@ -473,7 +461,6 @@ Branch.prototype.clone = function(){
   }
   return b;
 };
-
 function LSB(g, start, goal){
   this.kind = 'lsb';
   this.grid = g; this.start = start; this.goal = goal;
@@ -484,7 +471,6 @@ function LSB(g, start, goal){
   this.max_branches = 16 * scale; this.max_parked = 100 * scale;
   this.scar_threshold = 2.5; this.scar_decay = 0.004; this.tryEps = 0.5;
   this.minActive = 4 * scale; this.stallThreshold = 200 * scale;
-
   var dtg = new Float32Array(N);
   var gx = goal[0], gy = goal[1];
   for(var y=0; y<H; y++){
@@ -492,7 +478,6 @@ function LSB(g, start, goal){
     for(var x=0; x<W; x++){ var dx = x - gx; dtg[base + x] = Math.sqrt(dx*dx + dy*dy); }
   }
   this.dtg = dtg; this.goalK = goal[1]*W + goal[0];
-
   var openCount = new Uint8Array(N);
   for(var yy=0; yy<H; yy++){
     var bb = yy * W;
@@ -507,46 +492,37 @@ function LSB(g, start, goal){
     }
   }
   this.openCount = openCount;
-
   var openMinX = W, openMaxX = -1, openMinY = H, openMaxY = -1;
-  for(var oy=0; oy<H; oy++) for(var ox=0; ox<W; ox++){
-    if(g[oy][ox] === 0){
-      if(ox < openMinX) openMinX = ox; if(ox > openMaxX) openMaxX = ox;
-      if(oy < openMinY) openMinY = oy; if(oy > openMaxY) openMaxY = oy;
-    }
+  for(var oy=0; oy<H; oy++) for(var ox=0; ox<W; ox++) if(g[oy][ox] === 0){
+    if(ox < openMinX) openMinX = ox; if(ox > openMaxX) openMaxX = ox;
+    if(oy < openMinY) openMinY = oy; if(oy > openMaxY) openMaxY = oy;
   }
   this.openMinX = openMinX; this.openMaxX = openMaxX;
   this.openMinY = openMinY; this.openMaxY = openMaxY;
-
   this.visited = new Uint8Array(N); this.generated = new Uint8Array(N);
   this.expanded = new Uint8Array(N); this.dead = new Uint8Array(N);
   this.blocked = new Uint8Array(N); this.cutDead = new Uint8Array(N);
   this.frontier = new Uint8Array(N);
   this.scar = new Float32Array(N); this.scarKeys = {};
-
   this._visitedCount = 0; this._generatedCount = 0; this._expandedCount = 0;
   this._frontierCount = 0; this._deadCount = 0;
   this._recording = false;
   this._deltaVisited = []; this._deltaFrontier = []; this._deltaFrontierRemoved = []; this._deltaDead = [];
   this._pathValid = undefined; this._pathReason = undefined;
   this._reconPathCalls = 0; this._scoreBuf = [];
-
   this.vMinX = W; this.vMaxX = -1; this.vMinY = H; this.vMaxY = -1;
   this._frontierKeys = [];
-
   var k0 = start[1]*W + start[0];
   this.visited[k0] = 1; this._visitedCount++;
   this.generated[k0] = 1; this._generatedCount++;
   this.blocked[k0] = 1;
   this.vMinX = this.vMaxX = start[0];
   this.vMinY = this.vMaxY = start[1];
-
   var b = new Branch(start, [start], null, W);
   b.scoreCache = dtg[b.k];
   this.branches = [b];
   this._frontierKeys = [b.k];
   this.frontier[b.k] = 1; this._frontierCount = 1;
-
   this.parked = []; this.archive = [];
   this.done = false; this.exhausted = false; this.path = null;
   this.tick = 0; this.lastNovelTick = 0;
@@ -558,14 +534,6 @@ function LSB(g, start, goal){
   this.layerMedian = 0; this.parkedFull = false;
   this.algMs = 0;
 }
-
-LSB.prototype._reconPath = function(b){
-  this._reconPathCalls++;
-  var arr = []; var cur = b;
-  while(cur){ arr.push(cur.cell); cur = cur.parent; }
-  arr.reverse();
-  return arr;
-};
 LSB.prototype._addGenerated = function(k){
   if(!this.visited[k]){
     this.visited[k] = 1; this._visitedCount++;
@@ -606,7 +574,6 @@ LSB.prototype._shouldPark = function(b){
   if(this.parkedFull) return false;
   return b.scoreCache > this.layerMedian * 1.5;
 };
-
 LSB.prototype._checkForCuts = function(){
   var W = this.W, H = this.H, N = this.N;
   this.cutChecksRun++;
@@ -708,7 +675,6 @@ LSB.prototype._checkForCuts = function(){
   this.archive = survivingArchive;
   if(pruned > 0){ this.cutsMade++; this.cutCellsPruned += pruned; }
 };
-
 LSB.prototype.step = function(budget){
   var t0 = performance.now();
   var W = this.W, H = this.H, N = this.N;
@@ -798,7 +764,6 @@ LSB.prototype.step = function(budget){
   }
   this.algMs += performance.now() - t0;
 };
-
 LSB.prototype.stepBranch = function(b, next){
   var W = this.W, H = this.H;
   if(b.k === this.goalK){ this.done = true; this.path = b.path; return; }
@@ -869,7 +834,6 @@ LSB.prototype.stepBranch = function(b, next){
   }
   next.push(b);
 };
-
 LSB.prototype.backtrack = function(b, next){
   var W = this.W, blocked = this.blocked, goalK = this.goalK;
   this.backtracks++;
@@ -898,104 +862,63 @@ LSB.prototype.backtrack = function(b, next){
   return true;
 };
 
-// =============== SCS: Bidirectional A* with mutual cuts ===============
-// Two A* searches, one from start (F) and one from goal (B).
-// Each side periodically asks: "which cells can't reach the OTHER endpoint
-// without crossing my own closed set?" Those cells are useless for me to
-// expand, so I seal them. The side effect is that the goal-side cut
-// literally boxes in the goal, and the forward search only needs to reach
-// the box boundary to finish.
+// =============== SCS ===============
 function SCS(g, start, goal){
   this.kind = 'scs';
   this.grid = g; this.start = start; this.goal = goal;
   this.W = g[0].length; this.H = g.length;
   var W = this.W, H = this.H, N = W*H;
   this.N = N;
-
-  var openMinX = W, openMaxX = -1, openMinY = H, openMaxY = -1;
-  for(var oy=0; oy<H; oy++) for(var ox=0; ox<W; ox++){
-    if(g[oy][ox] === 0){
-      if(ox < openMinX) openMinX = ox; if(ox > openMaxX) openMaxX = ox;
-      if(oy < openMinY) openMinY = oy; if(oy > openMaxY) openMaxY = oy;
-    }
-  }
-  this.openMinX = openMinX; this.openMaxX = openMaxX;
-  this.openMinY = openMinY; this.openMaxY = openMaxY;
-
   var sk = start[1]*W + start[0];
   var gk = goal[1]*W + goal[0];
   this.sk = sk; this.gk = gk;
-
-  // Forward state
   this.openF = new MinHeap();
   this.openF.push([manhattan(start, goal), 0, start]);
   this.gF = new Map(); this.gF.set(sk, 0);
   this.cameF = new Map();
   this.closedF = new Uint8Array(N);
   this.sealedF = new Uint8Array(N);
-  this.fVisited = new Uint8Array(N);
-  this.fVisited[sk] = 1;
-
-  // Backward state
+  this.fVisited = new Uint8Array(N); this.fVisited[sk] = 1;
   this.openB = new MinHeap();
   this.openB.push([manhattan(goal, start), 0, goal]);
   this.gB = new Map(); this.gB.set(gk, 0);
   this.cameB = new Map();
   this.closedB = new Uint8Array(N);
   this.sealedB = new Uint8Array(N);
-  this.bVisited = new Uint8Array(N);
-  this.bVisited[gk] = 1;
-
-  // Shared display state
+  this.bVisited = new Uint8Array(N); this.bVisited[gk] = 1;
   this.visited = new Uint8Array(N); this.generated = new Uint8Array(N);
   this.expanded = new Uint8Array(N); this.frontier = new Uint8Array(N);
   this.dead = new Uint8Array(N);
   this.visited[sk] = 1; this.visited[gk] = 1;
   this.generated[sk] = 1; this.generated[gk] = 1;
   this.frontier[sk] = 1; this.frontier[gk] = 1;
-
-  this.bestCost = Infinity;
-  this.bestMeet = null;
-  this.bestSide = null;
-
+  this.bestCost = Infinity; this.bestMeet = null; this.bestSide = null;
   this.done = false; this.exhausted = false; this.path = null; this.algMs = 0;
-  this._visitedCount = 2; this._generatedCount = 2; this._expandedCount = 0;
-  this._frontierCount = 2;
+  this._visitedCount = 2; this._generatedCount = 2; this._expandedCount = 0; this._frontierCount = 2;
   this._recording = false;
   this._deltaVisited = []; this._deltaFrontier = []; this._deltaFrontierRemoved = []; this._deltaDead = [];
   this._pathValid = undefined; this._pathReason = undefined;
-
-  this.cutChecksRun = 0;
-  this.cutsF = 0; this.cutsB = 0;
+  this.cutChecksRun = 0; this.cutsF = 0; this.cutsB = 0;
   this.cellsSealedF = 0; this.cellsSealedB = 0;
   this.forwardExpanded = 0; this.backwardExpanded = 0;
   this._sinceCut = 0;
 }
-
 SCS.prototype._reconFromSide = function(side, endCell){
   var W = this.W, p = [], c = endCell;
-  if(side === 'F'){
-    while(c){ p.push(c); c = this.cameF.get(c[1]*W + c[0]); }
-    p.reverse();
-  } else {
-    while(c){ p.push(c); c = this.cameB.get(c[1]*W + c[0]); }
-  }
+  if(side === 'F'){ while(c){ p.push(c); c = this.cameF.get(c[1]*W + c[0]); } p.reverse(); }
+  else { while(c){ p.push(c); c = this.cameB.get(c[1]*W + c[0]); } }
   this.path = p;
 };
-
 SCS.prototype._reconMeet = function(){
   var W = this.W, v = this.bestMeet;
   if(!v) return;
-  var pathF = [];
-  var c = v;
+  var pathF = []; var c = v;
   while(c){ pathF.push(c); c = this.cameF.get(c[1]*W + c[0]); }
   pathF.reverse();
-  var pathB = [];
-  c = v;
+  var pathB = []; c = v;
   while(c){ pathB.push(c); c = this.cameB.get(c[1]*W + c[0]); }
   this.path = pathF.concat(pathB.slice(1));
 };
-
 SCS.prototype._expandSide = function(side){
   var W = this.W, H = this.H;
   var g = this.grid, rec = this._recording;
@@ -1009,52 +932,33 @@ SCS.prototype._expandSide = function(side){
   var myVisited = isF ? this.fVisited : this.bVisited;
   var target = isF ? this.goal : this.start;
   var targetK = target[1]*W + target[0];
-
   if(open.size === 0) return false;
-
   var item = open.pop();
   var gcost = item[1]; var c = item[2]; var kc = c[1]*W + c[0];
-  if(closed[kc]) return true;
-  if(sealed[kc]) return true;
-
+  if(closed[kc] || sealed[kc]) return true;
   closed[kc] = 1;
   this.visited[kc] = 1; this.expanded[kc] = 1;
   this._expandedCount++;
   if(isF) this.forwardExpanded++; else this.backwardExpanded++;
   if(this.frontier[kc]){ this.frontier[kc] = 0; this._frontierCount--; if(rec) this._deltaFrontierRemoved.push(kc); }
-
-  if(kc === targetK){
-    this.done = true;
-    this._reconFromSide(side, c);
-    return true;
-  }
-
+  if(kc === targetK){ this.done = true; this._reconFromSide(side, c); return true; }
   if(otherClosed[kc]){
-    var myG = gMap.get(kc);
-    var otherG = (isF ? this.gB : this.gF).get(kc);
+    var myG = gMap.get(kc), otherG = (isF ? this.gB : this.gF).get(kc);
     if(myG !== undefined && otherG !== undefined){
       var cost = myG + otherG;
-      if(cost < this.bestCost){
-        this.bestCost = cost;
-        this.bestMeet = c;
-        this.bestSide = side;
-      }
+      if(cost < this.bestCost){ this.bestCost = cost; this.bestMeet = c; this.bestSide = side; }
     }
   }
-
   for(var i=0; i<4; i++){
     var nx = c[0] + N4[i][0], ny = c[1] + N4[i][1];
     if(nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
     if(g[ny][nx] !== 0) continue;
     var kn = ny * W + nx;
-    if(closed[kn]) continue;
-    if(sealed[kn]) continue;
-    if(this.dead[kn]) continue;
+    if(closed[kn] || sealed[kn] || this.dead[kn]) continue;
     var ng = gcost + 1;
     var cur = gMap.get(kn);
     if(cur === undefined || ng < cur){
-      gMap.set(kn, ng);
-      came.set(kn, c);
+      gMap.set(kn, ng); came.set(kn, c);
       open.push([ng + manhattan([nx, ny], target), ng, [nx, ny]]);
       if(!this.frontier[kn]){ this.frontier[kn] = 1; this._frontierCount++; if(rec) this._deltaFrontier.push(kn); }
       if(!this.generated[kn]){ this.generated[kn] = 1; this._generatedCount++; }
@@ -1063,14 +967,9 @@ SCS.prototype._expandSide = function(side){
   }
   return true;
 };
-
 SCS.prototype._checkCuts = function(){
   var W = this.W, H = this.H, N = this.N;
   this.cutChecksRun++;
-
-  // Forward cut: from goal, BFS avoiding closedF. Unreached cells can't
-  // reach goal without crossing cells F has already expanded -> useless
-  // for F to explore.
   var reached = new Uint8Array(N);
   var queue = new Int32Array(N);
   var qh = 0, qt = 0;
@@ -1083,28 +982,18 @@ SCS.prototype._checkCuts = function(){
       if(nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
       if(this.grid[ny][nx] !== 0) continue;
       var nk = ny * W + nx;
-      if(reached[nk]) continue;
-      if(this.closedF[nk]) continue;
-      reached[nk] = 1;
-      queue[qt++] = nk;
+      if(reached[nk] || this.closedF[nk]) continue;
+      reached[nk] = 1; queue[qt++] = nk;
     }
   }
   var sealedF = 0;
   for(var y=0; y<H; y++) for(var x=0; x<W; x++){
     var k = y*W + x;
-    if(this.grid[y][x] !== 0) continue;
-    if(reached[k]) continue;
-    if(this.closedF[k]) continue;
-    if(this.sealedF[k]) continue;
-    this.sealedF[k] = 1;
-    sealedF++;
+    if(this.grid[y][x] !== 0 || reached[k] || this.closedF[k] || this.sealedF[k]) continue;
+    this.sealedF[k] = 1; sealedF++;
   }
   if(sealedF > 0){ this.cutsF++; this.cellsSealedF += sealedF; }
-
-  // Backward cut: symmetric.
-  reached = new Uint8Array(N);
-  queue = new Int32Array(N);
-  qh = 0; qt = 0;
+  reached = new Uint8Array(N); queue = new Int32Array(N); qh = 0; qt = 0;
   queue[qt++] = this.sk; reached[this.sk] = 1;
   while(qh < qt){
     var kc2 = queue[qh++];
@@ -1114,28 +1003,20 @@ SCS.prototype._checkCuts = function(){
       if(nx2 < 0 || nx2 >= W || ny2 < 0 || ny2 >= H) continue;
       if(this.grid[ny2][nx2] !== 0) continue;
       var nk2 = ny2 * W + nx2;
-      if(reached[nk2]) continue;
-      if(this.closedB[nk2]) continue;
-      reached[nk2] = 1;
-      queue[qt++] = nk2;
+      if(reached[nk2] || this.closedB[nk2]) continue;
+      reached[nk2] = 1; queue[qt++] = nk2;
     }
   }
   var sealedB = 0;
   for(var y2=0; y2<H; y2++) for(var x2=0; x2<W; x2++){
     var k2 = y2*W + x2;
-    if(this.grid[y2][x2] !== 0) continue;
-    if(reached[k2]) continue;
-    if(this.closedB[k2]) continue;
-    if(this.sealedB[k2]) continue;
-    this.sealedB[k2] = 1;
-    sealedB++;
+    if(this.grid[y2][x2] !== 0 || reached[k2] || this.closedB[k2] || this.sealedB[k2]) continue;
+    this.sealedB[k2] = 1; sealedB++;
   }
   if(sealedB > 0){ this.cutsB++; this.cellsSealedB += sealedB; }
 };
-
 SCS.prototype.step = function(budget){
   var t0 = performance.now();
-  var rec = this._recording;
   for(var i=0; i<budget && !this.done; i++){
     var did = false;
     if(this.openF.size > 0){ this._expandSide('F'); did = true; }
@@ -1149,24 +1030,295 @@ SCS.prototype.step = function(budget){
       break;
     }
   }
-
   if(this.bestCost !== Infinity && !this.done){
     var minF = this.openF.size > 0 ? this.openF.h[0][0] : Infinity;
     var minB = this.openB.size > 0 ? this.openB.h[0][0] : Infinity;
-    var threshold;
-    if(minF === Infinity) threshold = minB;
-    else if(minB === Infinity) threshold = minF;
-    else threshold = Math.max(minF, minB);
-    if(this.bestCost <= threshold){
-      this.done = true;
-      this._reconMeet();
-    }
+    var threshold = (minF === Infinity) ? minB : ((minB === Infinity) ? minF : Math.max(minF, minB));
+    if(this.bestCost <= threshold){ this.done = true; this._reconMeet(); }
   }
-
   this._sinceCut += budget;
   if(this._sinceCut >= SCS_CUT_INTERVAL && !this.done){
     this._sinceCut = 0;
     this._checkCuts();
+  }
+  this.algMs += performance.now() - t0;
+};
+
+// =============== TSCS: Tile-based SCS ===============
+// Split grid into TILE x TILE mini-mazes. Portals = open cells on tile
+// borders that connect to adjacent tiles. Build a portal graph where
+// edges are (a) intra-tile BFS distances and (b) cross-tile adjacent
+// portal pairs (cost 1). A* over this portal graph. Reconstruct by
+// stitching BFS paths within tiles.
+function TSCS(g, start, goal){
+  this.kind = 'tscs';
+  this.grid = g; this.start = start; this.goal = goal;
+  this.W = g[0].length; this.H = g.length;
+  var W = this.W, H = this.H;
+  var TS = TSCS_TILE_SIZE;
+  this.TS = TS;
+  this.tilesX = Math.ceil(W / TS);
+  this.tilesY = Math.ceil(H / TS);
+  this.numTiles = this.tilesX * this.tilesY;
+
+  this.portals = [];
+  this.portalAt = new Map();
+  this.tilePortals = [];
+  for(var t = 0; t < this.numTiles; t++) this.tilePortals.push([]);
+
+  this._addPortal(start[0], start[1], true);
+  this._addPortal(goal[0], goal[1], false);
+
+  for(var ty = 0; ty < this.tilesY; ty++){
+    for(var tx = 0; tx < this.tilesX; tx++){
+      for(var ly = 0; ly < TS; ly++){
+        for(var lx = 0; lx < TS; lx++){
+          var x = tx * TS + lx, y = ty * TS + ly;
+          if(x >= W || y >= H) continue;
+          if(g[y][x] !== 0) continue;
+          var kk = y * W + x;
+          if(this.portalAt.has(kk)) continue;
+          var isLeft = (lx === 0 && tx > 0 && g[y][x-1] === 0);
+          var isRight = (lx === TS - 1 && tx < this.tilesX - 1 && x + 1 < W && g[y][x+1] === 0);
+          var isTop = (ly === 0 && ty > 0 && g[y-1][x] === 0);
+          var isBottom = (ly === TS - 1 && ty < this.tilesY - 1 && y + 1 < H && g[y+1][x] === 0);
+          if(isLeft || isRight || isTop || isBottom) this._addPortal(x, y, false);
+        }
+      }
+    }
+  }
+
+  this.tileDist = new Array(this.numTiles);
+  this.tileBfsCalls = 0;
+
+  this.crossEdges = new Array(this.portals.length);
+  for(var pi = 0; pi < this.portals.length; pi++) this.crossEdges[pi] = [];
+  for(var pi2 = 0; pi2 < this.portals.length; pi2++){
+    var p = this.portals[pi2];
+    for(var di = 0; di < 4; di++){
+      var nx = p.x + N4[di][0], ny = p.y + N4[di][1];
+      if(nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+      if(g[ny][nx] !== 0) continue;
+      var nk = ny * W + nx;
+      var pj = this.portalAt.get(nk);
+      if(pj !== undefined && this.portals[pj].tile !== p.tile){
+        this.crossEdges[pi2].push(pj);
+      }
+    }
+  }
+
+  var sk = start[1]*W + start[0];
+  var gk = goal[1]*W + goal[0];
+  this.startPortalIdx = this.portalAt.get(sk);
+  this.goalPortalIdx = this.portalAt.get(gk);
+
+  this.open = new MinHeap();
+  this.gScore = new Float64Array(this.portals.length);
+  for(var i = 0; i < this.gScore.length; i++) this.gScore[i] = Infinity;
+  this.cameFrom = new Int32Array(this.portals.length);
+  for(var i = 0; i < this.cameFrom.length; i++) this.cameFrom[i] = -1;
+  this.closed = new Uint8Array(this.portals.length);
+  this.gScore[this.startPortalIdx] = 0;
+  this.open.push([this._h(this.portals[this.startPortalIdx]), 0, this.startPortalIdx]);
+
+  this.done = false; this.exhausted = false; this.path = null; this.algMs = 0;
+
+  this.visited = new Uint8Array(W*H);
+  this.generated = new Uint8Array(W*H);
+  this.expanded = new Uint8Array(W*H);
+  this.frontier = new Uint8Array(W*H);
+  this.dead = new Uint8Array(W*H);
+  this._visitedCount = 0; this._generatedCount = 0; this._expandedCount = 0; this._frontierCount = 0;
+
+  this._revealedTiles = new Uint8Array(this.numTiles);
+
+  this._recording = false;
+  this._deltaVisited = []; this._deltaFrontier = []; this._deltaFrontierRemoved = []; this._deltaDead = [];
+  this._pathValid = undefined; this._pathReason = undefined;
+
+  this.portalExpansions = 0;
+  this.cellsBfsed = 0;
+  this._revealTile(this.portals[this.startPortalIdx].tile);
+  this.frontier[sk] = 1; this._frontierCount++;
+}
+TSCS.prototype._addPortal = function(x, y, isStart){
+  var k = y * this.W + x;
+  if(this.portalAt.has(k)) return;
+  var W = this.W;
+  var TS = this.TS;
+  var tx = Math.floor(x / TS), ty = Math.floor(y / TS);
+  var tileIdx = ty * this.tilesX + tx;
+  var idx = this.portals.length;
+  this.portalAt.set(k, idx);
+  this.portals.push({ x: x, y: y, tile: tileIdx, isStart: isStart });
+  this.tilePortals[tileIdx].push(idx);
+};
+TSCS.prototype._h = function(p){
+  return Math.abs(p.x - this.goal[0]) + Math.abs(p.y - this.goal[1]);
+};
+TSCS.prototype._revealTile = function(tileIdx){
+  if(this._revealedTiles[tileIdx]) return;
+  this._revealedTiles[tileIdx] = 1;
+  var W = this.W, H = this.H, TS = this.TS;
+  var tx = tileIdx % this.tilesX, ty = Math.floor(tileIdx / this.tilesX);
+  var x0 = tx * TS, x1 = Math.min(x0 + TS, W);
+  var y0 = ty * TS, y1 = Math.min(y0 + TS, H);
+  for(var y = y0; y < y1; y++){
+    for(var x = x0; x < x1; x++){
+      if(this.grid[y][x] !== 0) continue;
+      var k = y * W + x;
+      if(!this.visited[k]){
+        this.visited[k] = 1; this._visitedCount++;
+        if(this._recording) this._deltaVisited.push(k);
+      }
+    }
+  }
+};
+TSCS.prototype._getTileDistances = function(tileIdx){
+  if(this.tileDist[tileIdx] !== undefined) return this.tileDist[tileIdx];
+  var W = this.W, H = this.H, TS = this.TS;
+  var tx = tileIdx % this.tilesX, ty = Math.floor(tileIdx / this.tilesX);
+  var portals = this.tilePortals[tileIdx];
+  var n = portals.length;
+  var dist = new Array(n);
+  for(var i = 0; i < n; i++) dist[i] = new Int32Array(n); for(var j = 0; j < n; j++) dist[i][j] = -1;
+
+  var x0 = tx * TS, x1 = Math.min(x0 + TS, W);
+  var y0 = ty * TS, y1 = Math.min(y0 + TS, H);
+  var tileCellCount = (x1-x0) * (y1-y0);
+
+  for(var i = 0; i < n; i++){
+    var src = this.portals[portals[i]];
+    this.tileBfsCalls++;
+    var visited = new Map();
+    var queue = [[src.x, src.y, 0]];
+    visited.set(src.y * W + src.x, 0);
+    var head = 0;
+    this.cellsBfsed++;
+    while(head < queue.length){
+      var cx = queue[head][0], cy = queue[head][1], d = queue[head][2]; head++;
+      var pk = this.portalAt.get(cy * W + cx);
+      if(pk !== undefined){
+        for(var jj = 0; jj < n; jj++){
+          if(portals[jj] === pk){ dist[i][jj] = d; break; }
+        }
+      }
+      for(var di = 0; di < 4; di++){
+        var nx = cx + N4[di][0], ny = cy + N4[di][1];
+        if(nx < x0 || nx >= x1 || ny < y0 || ny >= y1) continue;
+        if(this.grid[ny][nx] !== 0) continue;
+        var nk = ny * W + nx;
+        if(visited.has(nk)) continue;
+        visited.set(nk, d + 1);
+        queue.push([nx, ny, d + 1]);
+        this.cellsBfsed++;
+      }
+    }
+  }
+  this.tileDist[tileIdx] = { portals: portals, dist: dist };
+  return this.tileDist[tileIdx];
+};
+TSCS.prototype._reconstruct = function(){
+  var chain = []; var cur = this.goalPortalIdx;
+  while(cur !== -1){ chain.push(cur); cur = this.cameFrom[cur]; }
+  chain.reverse();
+  var path = [];
+  for(var i = 0; i < chain.length - 1; i++){
+    var pA = this.portals[chain[i]], pB = this.portals[chain[i+1]];
+    var segment;
+    if(pA.tile === pB.tile){
+      segment = this._bfsBetweenInTile(pA, pB);
+    } else {
+      segment = [[pA.x, pA.y], [pB.x, pB.y]];
+    }
+    if(segment.length === 0) continue;
+    if(i > 0) segment = segment.slice(1);
+    path.push.apply(path, segment);
+  }
+  this.path = path;
+};
+TSCS.prototype._bfsBetweenInTile = function(pA, pB){
+  var W = this.W, H = this.H, TS = this.TS;
+  var tx = pA.tile % this.tilesX, ty = Math.floor(pA.tile / this.tilesX);
+  var x0 = tx * TS, x1 = Math.min(x0 + TS, W);
+  var y0 = ty * TS, y1 = Math.min(y0 + TS, H);
+  var startK = pA.y * W + pA.x, goalK = pB.y * W + pB.x;
+  if(startK === goalK) return [[pA.x, pA.y]];
+  var came = new Map(); came.set(startK, -1);
+  var queue = [[pA.x, pA.y]]; var head = 0;
+  while(head < queue.length){
+    var cx = queue[head][0], cy = queue[head][1]; head++;
+    if(cx === pB.x && cy === pB.y) break;
+    for(var di = 0; di < 4; di++){
+      var nx = cx + N4[di][0], ny = cy + N4[di][1];
+      if(nx < x0 || nx >= x1 || ny < y0 || ny >= y1) continue;
+      if(this.grid[ny][nx] !== 0) continue;
+      var nk = ny * W + nx;
+      if(came.has(nk)) continue;
+      came.set(nk, cy * W + cx);
+      queue.push([nx, ny]);
+    }
+  }
+  if(!came.has(goalK)) return [];
+  var path = []; var cur = goalK;
+  while(cur !== -1){ var x = cur % W, y = Math.floor(cur / W); path.push([x, y]); cur = came.get(cur); if(cur === undefined) break; }
+  path.reverse(); return path;
+};
+TSCS.prototype.step = function(budget){
+  var t0 = performance.now();
+  for(var i = 0; i < budget && !this.done; i++){
+    if(this.open.size === 0){ this.done = true; this.exhausted = true; break; }
+    var item = this.open.pop();
+    var gcost = item[1], pi = item[2];
+    if(this.closed[pi]) continue;
+    this.closed[pi] = 1;
+    this.portalExpansions++; this._expandedCount++;
+
+    var p = this.portals[pi];
+    this._revealTile(p.tile);
+
+    if(this.frontier[p.y * this.W + p.x]){ this.frontier[p.y * this.W + p.x] = 0; this._frontierCount--; }
+
+    if(pi === this.goalPortalIdx){
+      this.done = true;
+      this._reconstruct();
+      break;
+    }
+
+    var tileData = this._getTileDistances(p.tile);
+    var localIdx = -1;
+    for(var li = 0; li < tileData.portals.length; li++) if(tileData.portals[li] === pi){ localIdx = li; break; }
+    if(localIdx >= 0){
+      for(var lj = 0; lj < tileData.portals.length; lj++){
+        if(lj === localIdx) continue;
+        var dd = tileData.dist[localIdx][lj];
+        if(dd < 0) continue;
+        var qj = tileData.portals[lj];
+        if(this.closed[qj]) continue;
+        var ng = gcost + dd;
+        if(ng < this.gScore[qj]){
+          this.gScore[qj] = ng; this.cameFrom[qj] = pi;
+          var q = this.portals[qj];
+          this.open.push([ng + this._h(q), ng, qj]);
+          var qk = q.y * this.W + q.x;
+          if(!this.frontier[qk]){ this.frontier[qk] = 1; this._frontierCount++; if(this._recording) this._deltaFrontier.push(qk); }
+        }
+      }
+    }
+
+    var cross = this.crossEdges[pi];
+    for(var ck = 0; ck < cross.length; ck++){
+      var qj2 = cross[ck];
+      if(this.closed[qj2]) continue;
+      var ng2 = gcost + 1;
+      if(ng2 < this.gScore[qj2]){
+        this.gScore[qj2] = ng2; this.cameFrom[qj2] = pi;
+        var q2 = this.portals[qj2];
+        this.open.push([ng2 + this._h(q2), ng2, qj2]);
+        var qk2 = q2.y * this.W + q2.x;
+        if(!this.frontier[qk2]){ this.frontier[qk2] = 1; this._frontierCount++; if(this._recording) this._deltaFrontier.push(qk2); }
+      }
+    }
   }
   this.algMs += performance.now() - t0;
 };
@@ -1181,19 +1333,12 @@ var BYTES_LSB_BRANCH = 80;
 var BYTES_LSB_FRAME = 64;
 
 function estimateLSBBytes(l){
-  var bytes = 0;
-  bytes += l.visited.byteLength + l.generated.byteLength + l.expanded.byteLength;
+  var bytes = l.visited.byteLength + l.generated.byteLength + l.expanded.byteLength;
   bytes += l.dead.byteLength + l.blocked.byteLength + l.cutDead.byteLength;
   bytes += l.frontier.byteLength + l.scar.byteLength + l.dtg.byteLength + l.openCount.byteLength;
   function branchBytes(b){
-    var sz = BYTES_OBJ_HEADER + BYTES_SMALL_ARRAY;
-    sz += b.path.length * BYTES_PER_SMALL_ARRAY;
-    sz += BYTES_SMALL_ARRAY;
-    for(var si=0; si<b.stack.length; si++){
-      var s = b.stack[si];
-      sz += BYTES_LSB_FRAME;
-      sz += BYTES_SMALL_ARRAY + s.options.length * BYTES_PER_SMALL_ARRAY;
-    }
+    var sz = BYTES_OBJ_HEADER + BYTES_SMALL_ARRAY + b.path.length * BYTES_PER_SMALL_ARRAY;
+    for(var si=0; si<b.stack.length; si++) sz += BYTES_LSB_FRAME + BYTES_SMALL_ARRAY + b.stack[si].options.length * BYTES_PER_SMALL_ARRAY;
     return sz;
   }
   for(var bi=0; bi<l.branches.length; bi++) bytes += branchBytes(l.branches[bi]);
@@ -1202,8 +1347,7 @@ function estimateLSBBytes(l){
   return bytes;
 }
 function estimateAStarBytes(a){
-  var bytes = 0;
-  bytes += a.open.h.length * (BYTES_SMALL_ARRAY + 3 * BYTES_PER_NUMBER + BYTES_PER_SMALL_ARRAY);
+  var bytes = a.open.h.length * (BYTES_SMALL_ARRAY + 3 * BYTES_PER_NUMBER + BYTES_PER_SMALL_ARRAY);
   bytes += countObjEntries(a.gMap) * BYTES_OBJECT_MAP_ENTRY;
   bytes += countObjEntries(a.came) * (BYTES_OBJECT_MAP_ENTRY + BYTES_PER_SMALL_ARRAY);
   bytes += countObjEntries(a.closed) * BYTES_OBJECT_MAP_ENTRY;
@@ -1214,8 +1358,7 @@ function estimateAStarBytes(a){
   return bytes;
 }
 function estimateDFSBytes(d){
-  var bytes = 0;
-  bytes += d.stack.length * (BYTES_SMALL_ARRAY + 2 * BYTES_PER_NUMBER);
+  var bytes = d.stack.length * (BYTES_SMALL_ARRAY + 2 * BYTES_PER_NUMBER);
   bytes += countObjEntries(d.came) * (BYTES_OBJECT_MAP_ENTRY + BYTES_PER_SMALL_ARRAY);
   bytes += countObjEntries(d.visited) * BYTES_OBJECT_MAP_ENTRY;
   bytes += countObjEntries(d.generated) * BYTES_OBJECT_MAP_ENTRY;
@@ -1225,25 +1368,41 @@ function estimateDFSBytes(d){
 }
 function estimateSCSBytes(s){
   var bytes = 0;
-  // Fixed arrays
   bytes += s.closedF.byteLength + s.closedB.byteLength;
   bytes += s.sealedF.byteLength + s.sealedB.byteLength;
   bytes += s.fVisited.byteLength + s.bVisited.byteLength;
   bytes += s.visited.byteLength + s.generated.byteLength + s.expanded.byteLength + s.frontier.byteLength + s.dead.byteLength;
-  // Open heaps
   bytes += s.openF.h.length * (BYTES_SMALL_ARRAY + 3 * BYTES_PER_NUMBER + BYTES_PER_SMALL_ARRAY);
   bytes += s.openB.h.length * (BYTES_SMALL_ARRAY + 3 * BYTES_PER_NUMBER + BYTES_PER_SMALL_ARRAY);
-  // Maps
-  bytes += s.gF.size * BYTES_OBJECT_MAP_ENTRY;
-  bytes += s.gB.size * BYTES_OBJECT_MAP_ENTRY;
-  bytes += s.cameF.size * (BYTES_OBJECT_MAP_ENTRY + BYTES_PER_SMALL_ARRAY);
-  bytes += s.cameB.size * (BYTES_OBJECT_MAP_ENTRY + BYTES_PER_SMALL_ARRAY);
+  bytes += s.gF.size * BYTES_OBJECT_MAP_ENTRY + s.gB.size * BYTES_OBJECT_MAP_ENTRY;
+  bytes += s.cameF.size * (BYTES_OBJECT_MAP_ENTRY + BYTES_PER_SMALL_ARRAY) + s.cameB.size * (BYTES_OBJECT_MAP_ENTRY + BYTES_PER_SMALL_ARRAY);
+  return bytes;
+}
+function estimateTSCSBytes(t){
+  var bytes = 0;
+  bytes += t.visited.byteLength + t.generated.byteLength + t.expanded.byteLength + t.frontier.byteLength + t.dead.byteLength;
+  bytes += t._revealedTiles.byteLength;
+  bytes += t.gScore.byteLength + t.cameFrom.byteLength + t.closed.byteLength;
+  bytes += t.portalAt.size * BYTES_OBJECT_MAP_ENTRY;
+  bytes += t.portals.length * (BYTES_OBJ_HEADER + 4 * BYTES_PER_NUMBER);
+  bytes += t.open.h.length * (BYTES_SMALL_ARRAY + 3 * BYTES_PER_NUMBER + BYTES_PER_SMALL_ARRAY);
+  var tiles = 0;
+  for(var i = 0; i < t.numTiles; i++){
+    if(t.tileDist[i]){
+      tiles++;
+      var n = t.tileDist[i].portals.length;
+      bytes += n * n * 4;
+    }
+  }
+  bytes += t.crossEdges.length * BYTES_SMALL_ARRAY;
+  for(var j = 0; j < t.crossEdges.length; j++) bytes += t.crossEdges[j].length * BYTES_PER_NUMBER;
   return bytes;
 }
 function estimateBytes(algo){
   if(algo.kind === 'lsb') return estimateLSBBytes(algo);
   if(algo.kind === 'dfs') return estimateDFSBytes(algo);
   if(algo.kind === 'scs') return estimateSCSBytes(algo);
+  if(algo.kind === 'tscs') return estimateTSCSBytes(algo);
   return estimateAStarBytes(algo);
 }
 
@@ -1252,19 +1411,16 @@ function makeAlgo(kind, g, start, goal){
   if(kind === 'LSB') return new LSB(g, start, goal);
   if(kind === 'DFS') return new DFS(g, start, goal);
   if(kind === 'SCS') return new SCS(g, start, goal);
+  if(kind === 'TSCS') return new TSCS(g, start, goal);
   throw new Error('unknown algo ' + kind);
 }
 
 // =============== stats ===============
 function getStats(algo){
-  var isLSB = algo.kind === 'lsb';
-  var isSCS = algo.kind === 'scs';
   var validPath;
-  if(!algo.path){
-    validPath = { ok:false, reason:'no path' };
-  } else if(algo._pathValid !== undefined){
-    validPath = { ok:algo._pathValid, reason:algo._pathReason };
-  } else {
+  if(!algo.path) validPath = { ok:false, reason:'no path' };
+  else if(algo._pathValid !== undefined) validPath = { ok:algo._pathValid, reason:algo._pathReason };
+  else {
     validPath = validatePath(algo.grid, algo.path, algo.start, algo.goal, algo.W, algo.H);
     algo._pathValid = validPath.ok; algo._pathReason = validPath.reason;
   }
@@ -1276,24 +1432,33 @@ function getStats(algo){
     success: algo.done && validPath.ok, exhausted: !!algo.exhausted, done: algo.done,
     frontier: algo._frontierCount,
     memBytes: estimateBytes(algo),
-    algMs: algo.algMs, isLSB: isLSB, isSCS: isSCS
+    algMs: algo.algMs, isLSB: algo.kind === 'lsb', isSCS: algo.kind === 'scs', isTSCS: algo.kind === 'tscs'
   };
-  if(isLSB){
+  if(algo.kind === 'lsb'){
     stats.backtracks = algo.backtracks; stats.parks = algo.parks; stats.resumes = algo.resumes;
     stats.kills = algo.kills; stats.earlyDeaths = algo.earlyDeaths;
     stats.cutsMade = algo.cutsMade; stats.cutCellsPruned = algo.cutCellsPruned;
     stats.cutKilledBranches = algo.cutKilledBranches; stats.cutChecksRun = algo.cutChecksRun;
     stats.cutGateSkips = algo.cutGateSkips; stats.archived = algo.archived; stats.revived = algo.revived;
     stats.archiveSize = algo.archive.length; stats.parkedCount = algo.parked.length;
-    stats.skippedBlocked = algo.skippedBlocked; stats.reconPathCalls = algo._reconPathCalls;
+    stats.skippedBlocked = algo.skippedBlocked;
     stats.liveBranches = algo.branches.length + algo.parked.length + algo.archive.length;
   }
-  if(isSCS){
+  if(algo.kind === 'scs'){
     stats.scsCutChecks = algo.cutChecksRun;
     stats.scsCutsF = algo.cutsF; stats.scsCutsB = algo.cutsB;
     stats.scsSealedF = algo.cellsSealedF; stats.scsSealedB = algo.cellsSealedB;
     stats.scsFExpanded = algo.forwardExpanded; stats.scsBExpanded = algo.backwardExpanded;
     stats.scsBestCost = algo.bestCost === Infinity ? null : algo.bestCost;
+  }
+  if(algo.kind === 'tscs'){
+    stats.tscsPortals = algo.portals.length;
+    stats.tscsPortalExpansions = algo.portalExpansions;
+    stats.tscsTileBfsCalls = algo.tileBfsCalls;
+    stats.tscsCellsBfsed = algo.cellsBfsed;
+    stats.tscsTiles = algo.numTiles;
+    stats.tscsRevealed = 0;
+    for(var i = 0; i < algo._revealedTiles.length; i++) if(algo._revealedTiles[i]) stats.tscsRevealed++;
   }
   return stats;
 }
@@ -1376,7 +1541,7 @@ var ctxA = cA.getContext('2d'), ctxL = cL.getContext('2d');
 var COLOR = { wall:'#555', open:'#000', start:'#0a0', goal:'#c0c',
   frontier:'#ff0', parked:'#f80', visited:'#2a4a7a', path:'#0ff', dead:'#a00' };
 
-function draw(ctx, g, view, path, parked, W, H){
+function draw(ctx, g, view, path, parked, W, H, showTiles, tilesX, tilesY, TS){
   ctx.fillStyle = COLOR.open;
   ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
   var pathSet = {};
@@ -1398,6 +1563,18 @@ function draw(ctx, g, view, path, parked, W, H){
       if(col){ ctx.fillStyle = col; ctx.fillRect(x*CELL, y*CELL, CELL, CELL); }
     }
   }
+  if(showTiles){
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.lineWidth = 1;
+    for(var tx = 1; tx < tilesX; tx++){
+      var xg = tx * TS * CELL;
+      ctx.beginPath(); ctx.moveTo(xg, 0); ctx.lineTo(xg, ctx.canvas.height); ctx.stroke();
+    }
+    for(var ty = 1; ty < tilesY; ty++){
+      var yg = ty * TS * CELL;
+      ctx.beginPath(); ctx.moveTo(0, yg); ctx.lineTo(ctx.canvas.width, yg); ctx.stroke();
+    }
+  }
 }
 function fmtStats(stats){
   if(!stats) return '';
@@ -1412,15 +1589,17 @@ function fmtStats(stats){
   if(stats.isLSB){
     s += 'bt: <b>' + stats.backtracks + '</b>  parks: <b>' + stats.parks + '</b>  res: <b>' + stats.resumes + '</b><br>';
     s += 'kills: <b>' + stats.kills + '</b>  parked: <b>' + stats.parkedCount + '</b>  skipB: <b>' + stats.skippedBlocked + '</b><br>';
-    s += 'early dead: <b>' + stats.earlyDeaths + '</b>  recon: <b>' + stats.reconPathCalls + '</b><br>';
-    s += 'archive: <b>' + stats.archiveSize + '</b>  arch: <b>' + stats.archived + '</b>  rev: <b>' + stats.revived + '</b><br>';
     s += 'cuts: <b>' + stats.cutsMade + '</b>  checks: <b>' + stats.cutChecksRun + '</b>  pruned: <b>' + stats.cutCellsPruned + '</b><br>';
   }
   if(stats.isSCS){
     s += 'checks: <b>' + stats.scsCutChecks + '</b>  cutsF/B: <b>' + stats.scsCutsF + '/' + stats.scsCutsB + '</b><br>';
     s += 'sealedF/B: <b>' + stats.scsSealedF + '/' + stats.scsSealedB + '</b><br>';
     s += 'fExp/bExp: <b>' + stats.scsFExpanded + '/' + stats.scsBExpanded + '</b><br>';
-    s += 'best meet cost: <b>' + (stats.scsBestCost !== null ? stats.scsBestCost : '-') + '</b><br>';
+  }
+  if(stats.isTSCS){
+    s += 'portals: <b>' + stats.tscsPortals + '</b>  expanded: <b>' + stats.tscsPortalExpansions + '</b><br>';
+    s += 'tiles revealed: <b>' + stats.tscsRevealed + '/' + stats.tscsTiles + '</b><br>';
+    s += 'tileBFS calls: <b>' + stats.tscsTileBfsCalls + '</b>  cellsBFSed: <b>' + stats.tscsCellsBfsed + '</b><br>';
   }
   s += 'done: <b>' + stats.done + '</b>';
   if(stats.exhausted) s += ' <span style="color:#f88">(exhausted)</span>';
@@ -1429,8 +1608,14 @@ function fmtStats(stats){
   return s;
 }
 function renderCurrent(){
-  draw(ctxA, recording.grid, playbackA, currentA.path, currentA.parked, recording.W, recording.H);
-  draw(ctxL, recording.grid, playbackL, currentL.path, currentL.parked, recording.W, recording.H);
+  var lTSCS = currentL.stats && currentL.stats.isTSCS;
+  var rTSCS = currentA.stats && currentA.stats.isTSCS;
+  var lTS = lTSCS ? recording.tscsTileInfoL : null;
+  var rTS = rTSCS ? recording.tscsTileInfoR : null;
+  draw(ctxA, recording.grid, playbackA, currentA.path, currentA.parked, recording.W, recording.H,
+       rTSCS, rTS ? rTS.tilesX : 0, rTS ? rTS.tilesY : 0, rTS ? rTS.TS : 0);
+  draw(ctxL, recording.grid, playbackL, currentL.path, currentL.parked, recording.W, recording.H,
+       lTSCS, lTS ? lTS.tilesX : 0, lTS ? lTS.tilesY : 0, lTS ? lTS.TS : 0);
   var showA = finished ? recording.framesA[recording.framesA.length - 1].stats : currentA.stats;
   var showL = finished ? recording.framesL[recording.framesL.length - 1].stats : currentL.stats;
   document.getElementById('sA').innerHTML = fmtStats(showA);
@@ -1497,11 +1682,26 @@ function buildAndPlay(){
   document.getElementById('metaL').innerHTML = '';
   setTimeout(function(){
     var t0 = performance.now();
-    recording = buildRecording();
+    var lAlgo = makeAlgo(LEFT_ALGO, grid, START, GOAL);
+    var rAlgo = makeAlgo(RIGHT_ALGO, grid, START, GOAL);
+    var framesL = recordFrames(lAlgo);
+    var framesR = recordFrames(rAlgo);
+    var ticks = Math.max(framesL.length, framesR.length);
+    var idleL = framesL[framesL.length-1];
+    while(framesL.length < ticks) framesL.push({ addVisited:[], addFrontier:[], remFrontier:[], addDead:[], path: idleL.path, parked: idleL.parked, stats: idleL.stats });
+    var idleR = framesR[framesR.length-1];
+    while(framesR.length < ticks) framesR.push({ addVisited:[], addFrontier:[], remFrontier:[], addDead:[], path: idleR.path, parked: idleR.parked, stats: idleR.stats });
+    recording = { framesA: framesL, framesL: framesR, ticks: ticks, grid: grid, START: START, GOAL: GOAL, W: W, H: H };
+    if(lAlgo.kind === 'tscs'){
+      recording.tscsTileInfoL = { tilesX: lAlgo.tilesX, tilesY: lAlgo.tilesY, TS: lAlgo.TS };
+    }
+    if(rAlgo.kind === 'tscs'){
+      recording.tscsTileInfoR = { tilesX: rAlgo.tilesX, tilesY: rAlgo.tilesY, TS: rAlgo.TS };
+    }
     var computeMs = performance.now() - t0;
     recording.computeMs = computeMs;
     banner.textContent = 'Recorded ' + recording.ticks + ' frames in ' + fmtTime(computeMs) +
-                         ' (' + LEFT_ALGO + ': ' + recording.framesA.length + ', ' + RIGHT_ALGO + ': ' + recording.framesL.length + ')';
+                         ' (' + LEFT_ALGO + ': ' + framesL.length + ', ' + RIGHT_ALGO + ': ' + framesR.length + ')';
     setTimeout(function(){ banner.style.display = 'none'; }, 2500);
     resetPlayback();
     paused = false; finished = false; lastFrameTime = 0;
@@ -1571,7 +1771,8 @@ function massTest(reuse, N){
     var LKind = LEFT_ALGO, RKind = RIGHT_ALGO;
     var rows = [];
     var aSuccess = 0, lSuccess = 0, aWins = 0, lWins = 0, ties = 0;
-    var acc = { aTime:0, lTime:0, aExp:0, lExp:0, aPath:0, lPath:0, aMem:0, lMem:0, n:0 };
+    var acc = { aTime:0, lTime:0, aExp:0, lExp:0, aPath:0, lPath:0, aMem:0, lMem:0,
+                aUniq:0, lUniq:0, n:0 };
     for(var pi=0; pi<plans.length; pi++){
       var plan = plans[pi];
       var g = plan.fn(plan.seed);
@@ -1585,12 +1786,13 @@ function massTest(reuse, N){
       if(!aOk && !lOk) verdict = 'both FAIL';
       else if(!lOk) verdict = LKind + ' (' + RKind + ' fail)';
       else if(!aOk) verdict = RKind + ' (' + LKind + ' fail)';
-      else if(ra.stats.expanded < rl.stats.expanded){ verdict = LKind; aWins++; }
-      else if(rl.stats.expanded < ra.stats.expanded){ verdict = RKind; lWins++; }
+      else if(ra.stats.uniqueVisited < rl.stats.uniqueVisited){ verdict = LKind; aWins++; }
+      else if(rl.stats.uniqueVisited < ra.stats.uniqueVisited){ verdict = RKind; lWins++; }
       else { verdict = 'tie'; ties++; }
       if(aOk && lOk){
         acc.aTime += ra.avgMs; acc.lTime += rl.avgMs;
         acc.aExp += ra.stats.expanded; acc.lExp += rl.stats.expanded;
+        acc.aUniq += ra.stats.uniqueVisited; acc.lUniq += rl.stats.uniqueVisited;
         acc.aPath += ra.stats.pathLen || 0; acc.lPath += rl.stats.pathLen || 0;
         acc.aMem += ra.stats.memBytes; acc.lMem += rl.stats.memBytes;
         acc.n++;
@@ -1598,6 +1800,7 @@ function massTest(reuse, N){
       rows.push({ type: plan.type, seed: plan.seed,
         aTime: ra.avgMs, lTime: rl.avgMs, aReps: ra.reps, lReps: rl.reps,
         aExp: ra.stats.expanded, lExp: rl.stats.expanded,
+        aUniq: ra.stats.uniqueVisited, lUniq: rl.stats.uniqueVisited,
         aPath: ra.stats.pathLen, lPath: rl.stats.pathLen,
         aMem: ra.stats.memBytes, lMem: rl.stats.memBytes,
         aSuccess: aOk, lSuccess: lOk, lReason: rl.stats.pathReason, verdict: verdict });
@@ -1607,34 +1810,38 @@ function massTest(reuse, N){
     var txt = '';
     txt += 'MASS TEST - ' + N + ' mazes (' + W + 'x' + H + ')' + (reuse && lastN === N ? '  [reused]' : '  [fresh]') + '\n';
     txt += 'Left: ' + LKind + '   Right: ' + RKind + '\n';
-    txt += 'Verdict by expanded-cells. Memory is a rough estimate.\n\n';
+    txt += 'Verdict by UNIQUE CELLS TOUCHED (fairer for tiled algorithms).\n';
+    txt += 'Memory is a rough estimate (typed arrays exact; JS objects estimated).\n\n';
     txt += pad('type', 9) + padL('seed', 12)
-         + padL('Lt', 10) + padL('Rt', 10)
-         + padL('Lexp', 7) + padL('Rexp', 7)
-         + padL('Lmem', 7) + padL('Rmem', 7)
-         + padL('Lpth', 7) + padL('Rpth', 7)
+         + padL('Lt', 9) + padL('Rt', 9)
+         + padL('Lexp', 6) + padL('Rexp', 6)
+         + padL('Luniq', 6) + padL('Runiq', 6)
+         + padL('Lmem', 6) + padL('Rmem', 6)
+         + padL('Lpth', 6) + padL('Rpth', 6)
          + padL('ok', 4) + padL('rep', 7)
          + '  verdict\n';
-    txt += '-------------------------------------------------------------------------------------------\n';
+    txt += '--------------------------------------------------------------------------------------------------------\n';
     for(var ri=0; ri<rows.length; ri++){
       var r = rows[ri];
       txt += pad(r.type, 9) + padL(r.seed.toString(16), 12)
-          + padL(fmtTime(r.aTime), 10) + padL(fmtTime(r.lTime), 10)
-          + padL(r.aExp, 7) + padL(r.lExp, 7)
-          + padL(fmtBytesShort(r.aMem), 7) + padL(fmtBytesShort(r.lMem), 7)
-          + padL(r.aPath === null ? '-' : r.aPath, 7) + padL(r.lPath === null ? '-' : r.lPath, 7)
+          + padL(fmtTime(r.aTime), 9) + padL(fmtTime(r.lTime), 9)
+          + padL(r.aExp, 6) + padL(r.lExp, 6)
+          + padL(r.aUniq, 6) + padL(r.lUniq, 6)
+          + padL(fmtBytesShort(r.aMem), 6) + padL(fmtBytesShort(r.lMem), 6)
+          + padL(r.aPath === null ? '-' : r.aPath, 6) + padL(r.lPath === null ? '-' : r.lPath, 6)
           + padL(r.aSuccess && r.lSuccess ? 'Y/Y' : (r.aSuccess ? 'Y/N' : 'N/N'), 4)
           + padL(r.aReps + '/' + r.lReps, 7)
           + '  ' + r.verdict + '\n';
       if(!r.lSuccess && r.lReason && r.lReason !== 'no path') txt += '  ' + RKind + ' path invalid: ' + r.lReason + '\n';
     }
-    txt += '-------------------------------------------------------------------------------------------\n';
+    txt += '--------------------------------------------------------------------------------------------------------\n';
     if(acc.n > 0){
       txt += pad('AVG', 9) + padL('', 12)
-          + padL(fmtTime(acc.aTime/acc.n), 10) + padL(fmtTime(acc.lTime/acc.n), 10)
-          + padL(Math.round(acc.aExp/acc.n), 7) + padL(Math.round(acc.lExp/acc.n), 7)
-          + padL(fmtBytesShort(acc.aMem/acc.n), 7) + padL(fmtBytesShort(acc.lMem/acc.n), 7)
-          + padL(Math.round(acc.aPath/acc.n), 7) + padL(Math.round(acc.lPath/acc.n), 7)
+          + padL(fmtTime(acc.aTime/acc.n), 9) + padL(fmtTime(acc.lTime/acc.n), 9)
+          + padL(Math.round(acc.aExp/acc.n), 6) + padL(Math.round(acc.lExp/acc.n), 6)
+          + padL(Math.round(acc.aUniq/acc.n), 6) + padL(Math.round(acc.lUniq/acc.n), 6)
+          + padL(fmtBytesShort(acc.aMem/acc.n), 6) + padL(fmtBytesShort(acc.lMem/acc.n), 6)
+          + padL(Math.round(acc.aPath/acc.n), 6) + padL(Math.round(acc.lPath/acc.n), 6)
           + padL('', 4) + padL('', 7)
           + '  (n=' + acc.n + ')\n';
     }
