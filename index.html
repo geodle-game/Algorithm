@@ -1044,12 +1044,7 @@ SCS.prototype.step = function(budget){
   this.algMs += performance.now() - t0;
 };
 
-// =============== TSCS: Tile-based SCS ===============
-// Split grid into TILE x TILE mini-mazes. Portals = open cells on tile
-// borders that connect to adjacent tiles. Build a portal graph where
-// edges are (a) intra-tile BFS distances and (b) cross-tile adjacent
-// portal pairs (cost 1). A* over this portal graph. Reconstruct by
-// stitching BFS paths within tiles.
+// =============== TSCS ===============
 function TSCS(g, start, goal){
   this.kind = 'tscs';
   this.grid = g; this.start = start; this.goal = goal;
@@ -1181,11 +1176,13 @@ TSCS.prototype._getTileDistances = function(tileIdx){
   var portals = this.tilePortals[tileIdx];
   var n = portals.length;
   var dist = new Array(n);
-  for(var i = 0; i < n; i++) dist[i] = new Int32Array(n); for(var j = 0; j < n; j++) dist[i][j] = -1;
+  for(var i = 0; i < n; i++){
+    dist[i] = new Int32Array(n);
+    for(var j = 0; j < n; j++) dist[i][j] = -1;
+  }
 
   var x0 = tx * TS, x1 = Math.min(x0 + TS, W);
   var y0 = ty * TS, y1 = Math.min(y0 + TS, H);
-  var tileCellCount = (x1-x0) * (y1-y0);
 
   for(var i = 0; i < n; i++){
     var src = this.portals[portals[i]];
@@ -1329,7 +1326,6 @@ var BYTES_SMALL_ARRAY = 32;
 var BYTES_PER_NUMBER = 8;
 var BYTES_PER_SMALL_ARRAY = 48;
 var BYTES_OBJECT_MAP_ENTRY = 72;
-var BYTES_LSB_BRANCH = 80;
 var BYTES_LSB_FRAME = 64;
 
 function estimateLSBBytes(l){
@@ -1386,10 +1382,8 @@ function estimateTSCSBytes(t){
   bytes += t.portalAt.size * BYTES_OBJECT_MAP_ENTRY;
   bytes += t.portals.length * (BYTES_OBJ_HEADER + 4 * BYTES_PER_NUMBER);
   bytes += t.open.h.length * (BYTES_SMALL_ARRAY + 3 * BYTES_PER_NUMBER + BYTES_PER_SMALL_ARRAY);
-  var tiles = 0;
   for(var i = 0; i < t.numTiles; i++){
     if(t.tileDist[i]){
-      tiles++;
       var n = t.tileDist[i].portals.length;
       bytes += n * n * 4;
     }
@@ -1494,19 +1488,6 @@ function recordFrames(algo){
   return frames;
 }
 
-function buildRecording(){
-  var L = makeAlgo(LEFT_ALGO, grid, START, GOAL);
-  var R = makeAlgo(RIGHT_ALGO, grid, START, GOAL);
-  var framesL = recordFrames(L);
-  var framesR = recordFrames(R);
-  var ticks = Math.max(framesL.length, framesR.length);
-  var idleL = framesL[framesL.length-1];
-  while(framesL.length < ticks) framesL.push({ addVisited:[], addFrontier:[], remFrontier:[], addDead:[], path: idleL.path, parked: idleL.parked, stats: idleL.stats });
-  var idleR = framesR[framesR.length-1];
-  while(framesR.length < ticks) framesR.push({ addVisited:[], addFrontier:[], remFrontier:[], addDead:[], path: idleR.path, parked: idleR.parked, stats: idleR.stats });
-  return { framesA: framesL, framesL: framesR, ticks: ticks, grid: grid, START: START, GOAL: GOAL, W: W, H: H };
-}
-
 // =============== playback ===============
 var recording = null, playbackIdx = -1, paused = false, finished = false, lastFrameTime = 0, tickAccumulator = 0;
 var playbackA = { visited:{}, frontier:{}, dead:{} }, playbackL = { visited:{}, frontier:{}, dead:{} };
@@ -1563,7 +1544,7 @@ function draw(ctx, g, view, path, parked, W, H, showTiles, tilesX, tilesY, TS){
       if(col){ ctx.fillStyle = col; ctx.fillRect(x*CELL, y*CELL, CELL, CELL); }
     }
   }
-  if(showTiles){
+  if(showTiles && tilesX > 0){
     ctx.strokeStyle = 'rgba(255,255,255,0.08)';
     ctx.lineWidth = 1;
     for(var tx = 1; tx < tilesX; tx++){
