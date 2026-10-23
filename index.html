@@ -72,6 +72,8 @@
   <button style="background:#333;border-color:#666" onclick="massTest(true, 12)">Reuse last (12)</button>
   <button style="background:#333;border-color:#666" onclick="massTest(false, 50)">Mass test (50)</button>
   <button style="background:#333;border-color:#666" onclick="massTest(true, 50)">Reuse last (50)</button>
+  <button style="background:#553;border-color:#a97" onclick="massTestAll(50)">★ ALL algos (50/type, all sizes)</button>
+  <button style="background:#333;border-color:#666" onclick="massTestAll(10)">ALL algos (10/type)</button>
 </div>
 
 <div class="panel" style="margin-bottom:8px;">
@@ -249,6 +251,11 @@ var MAZE_TYPES = [
   { name:'Prim',    fn: makeMazePrim },
   { name:'Kruskal', fn: makeMazeKruskal }
 ];
+
+function mazeEndpoints(w, h){
+  var rx = Math.floor((w-1)/2), ry = Math.floor((h-1)/2);
+  return { S: [1, 1], G: [2*rx-1, 2*ry-1] };
+}
 
 function manhattan(a,b){ return Math.abs(a[0]-b[0]) + Math.abs(a[1]-b[1]); }
 var N4 = [[1,0],[-1,0],[0,1],[0,-1]];
@@ -1636,13 +1643,13 @@ function setScenario(name){
   else if(name === 'r020'){   START = [0,0]; GOAL = [W-1,H-1]; grid = makeRandom(0.20, freshSeed()); }
   else if(name === 'r030'){   START = [0,0]; GOAL = [W-1,H-1]; grid = makeRandom(0.30, freshSeed()); }
   else if(name === 'r038'){   START = [0,0]; GOAL = [W-1,H-1]; grid = makeRandom(0.38, freshSeed()); }
-  else if(name === 'maze_dfs'){     grid = makeMazeDFS(freshSeed());     START = [1,1]; GOAL = [W-3,H-3]; }
-  else if(name === 'maze_prim'){    grid = makeMazePrim(freshSeed());    START = [1,1]; GOAL = [W-3,H-3]; }
-  else if(name === 'maze_kruskal'){ grid = makeMazeKruskal(freshSeed()); START = [1,1]; GOAL = [W-3,H-3]; }
+  else if(name === 'maze_dfs'){     grid = makeMazeDFS(freshSeed());     var e1 = mazeEndpoints(W,H); START = e1.S; GOAL = e1.G; }
+  else if(name === 'maze_prim'){    grid = makeMazePrim(freshSeed());    var e2 = mazeEndpoints(W,H); START = e2.S; GOAL = e2.G; }
+  else if(name === 'maze_kruskal'){ grid = makeMazeKruskal(freshSeed()); var e3 = mazeEndpoints(W,H); START = e3.S; GOAL = e3.G; }
   else if(name === 'maze_any'){
     var t = MAZE_TYPES[Math.floor(Math.random() * MAZE_TYPES.length)];
     grid = t.fn(freshSeed());
-    START = [1,1]; GOAL = [W-3,H-3];
+    var e4 = mazeEndpoints(W,H); START = e4.S; GOAL = e4.G;
   }
   buildAndPlay();
 }
@@ -1712,7 +1719,7 @@ function loop(now){
   renderCurrent();
 }
 
-// =============== mass test ===============
+// =============== mass test (2 algorithms, mixed types) ===============
 var lastSeeds = null, lastN = 0;
 
 function runOneOnce(factory){
@@ -1757,7 +1764,8 @@ function massTest(reuse, N){
     for(var pi=0; pi<plans.length; pi++){
       var plan = plans[pi];
       var g = plan.fn(plan.seed);
-      var S = [1,1], G = [W-3, H-3];
+      var e = mazeEndpoints(W, H);
+      var S = e.S, G = e.G;
       var ra = runBench(function(){ return makeAlgo(LKind, g, S, G); });
       var rl = runBench(function(){ return makeAlgo(RKind, g, S, G); });
       var aOk = ra.stats.success, lOk = rl.stats.success;
@@ -1791,8 +1799,8 @@ function massTest(reuse, N){
     var txt = '';
     txt += 'MASS TEST - ' + N + ' mazes (' + W + 'x' + H + ')' + (reuse && lastN === N ? '  [reused]' : '  [fresh]') + '\n';
     txt += 'Left: ' + LKind + '   Right: ' + RKind + '\n';
-    txt += 'Verdict by UNIQUE CELLS TOUCHED (fairer for tiled algorithms).\n';
-    txt += 'Memory is a rough estimate (typed arrays exact; JS objects estimated).\n\n';
+    txt += 'Verdict by UNIQUE CELLS TOUCHED.\n';
+    txt += 'Memory is a rough estimate.\n\n';
     txt += pad('type', 9) + padL('seed', 12)
          + padL('Lt', 9) + padL('Rt', 9)
          + padL('Lexp', 6) + padL('Rexp', 6)
@@ -1830,6 +1838,243 @@ function massTest(reuse, N){
     txt += 'WINS  ' + LKind + ': ' + aWins + '   ' + RKind + ': ' + lWins + '   tie: ' + ties + '\n';
     out.textContent = txt;
   }, 30);
+}
+
+// =============== mass test: ALL algorithms on PERFECT MAZES ===============
+var ALL_ALGO_KINDS = ['A*', 'LSB', 'DFS', 'SCS', 'TSCS'];
+
+var ALL_TEST_TYPES = [
+  { key:'maze_dfs',     name:'MazeDFS'  },
+  { key:'maze_prim',    name:'MazePrim' },
+  { key:'maze_kruskal', name:'MazeKrsk' }
+];
+
+var ALL_TEST_SIZES = [[60,30],[100,50],[150,75],[200,100],[300,150],[400,200]];
+var ALL_TEST_MIN_MS = 5;
+var ALL_TEST_CAP_MS = 200;
+
+function padR(s, n){ s = String(s); while(s.length < n) s += ' '; return s.slice(0, n); }
+function padLft(s, n){ s = String(s); while(s.length < n) s = ' ' + s; return s.slice(-n); }
+function repStr(ch, n){ var s = ''; while(s.length < n) s += ch; return s; }
+
+function genGridAtSize(key, seed, w, h){
+  var oW = W, oH = H;
+  W = w; H = h;
+  var g;
+  if(key === 'maze_dfs')          g = makeMazeDFS(seed);
+  else if(key === 'maze_prim')    g = makeMazePrim(seed);
+  else if(key === 'maze_kruskal') g = makeMazeKruskal(seed);
+  else                            g = makeOpen();
+  W = oW; H = oH;
+  return g;
+}
+
+function startGoalAtSize(key, w, h){
+  if(key.indexOf('maze') === 0){
+    var e = mazeEndpoints(w, h);
+    return { S: e.S, G: e.G };
+  }
+  return { S: [0, 0], G: [w-1, h-1] };
+}
+
+function newStatRow(){
+  return { n:0, ok:0, capped:0, wins:0, score:0, time:0, exp:0, uniq:0, mem:0, pathSum:0, pathN:0 };
+}
+
+function runOneCapped(factory, capMs){
+  var algo = factory();
+  var iters = 0;
+  var t0 = performance.now();
+  var capped = false;
+  while(!algo.done && iters < MASS_MAX_ITERS){
+    algo.step(MASS_BUDGET);
+    iters++;
+    if((iters & 31) === 0 && performance.now() - t0 > capMs){ capped = true; break; }
+  }
+  var stats = getStats(algo);
+  stats.capped = capped;
+  return { stats: stats, algMs: algo.algMs };
+}
+
+function runBenchCapped(factory, minMs, capMs){
+  var totalMs = 0, reps = 0, last = null;
+  var anyCapped = false;
+  while(reps < MASS_MAX_REPS){
+    last = runOneCapped(factory, capMs);
+    totalMs += last.algMs; reps++;
+    if(last.stats.capped) anyCapped = true;
+    if(totalMs >= minMs) break;
+  }
+  if(anyCapped) last.stats.capped = true;
+  return { stats: last.stats, avgMs: totalMs / reps, reps: reps };
+}
+
+function updateRow(row, x){
+  row.n++;
+  row.time += x.avgMs;
+  row.exp += x.stats.expanded;
+  row.uniq += x.stats.uniqueVisited;
+  row.mem += x.stats.memBytes;
+  if(x.stats.capped) row.capped++;
+  if(x.stats.success){
+    row.ok++;
+    row.pathSum += x.stats.pathLen || 0;
+    row.pathN++;
+  }
+}
+
+function massTestAll(perType){
+  perType = perType || 50;
+  paused = true;
+  document.getElementById('pauseBtn').innerText = 'Resume';
+  var out = document.getElementById('results');
+  out.style.display = 'block';
+
+  var algos = ALL_ALGO_KINDS, types = ALL_TEST_TYPES, sizes = ALL_TEST_SIZES;
+
+  var acc = {}, overall = {}, sizeAcc = {};
+  for(var i = 0; i < types.length; i++){
+    acc[types[i].key] = {};
+    for(var j = 0; j < algos.length; j++) acc[types[i].key][algos[j]] = newStatRow();
+  }
+  for(var j2 = 0; j2 < algos.length; j2++) overall[algos[j2]] = newStatRow();
+  for(var si = 0; si < sizes.length; si++){
+    var sk = sizes[si][0] + 'x' + sizes[si][1];
+    sizeAcc[sk] = {};
+    for(var aj = 0; aj < algos.length; aj++) sizeAcc[sk][algos[aj]] = newStatRow();
+  }
+
+  var plans = [];
+  for(var ti = 0; ti < types.length; ti++){
+    for(var k = 0; k < perType; k++){
+      var sz = sizes[k % sizes.length];
+      plans.push({ t: types[ti], w: sz[0], h: sz[1], seed: freshSeed() });
+    }
+  }
+
+  var pi = 0;
+  var startedAt = performance.now();
+  out.textContent = 'Running mass test (perfect mazes only): 0 / ' + plans.length + ' mazes...';
+
+  function runPlan(plan){
+    var g  = genGridAtSize(plan.t.key, plan.seed, plan.w, plan.h);
+    var sg = startGoalAtSize(plan.t.key, plan.w, plan.h);
+    var res = [];
+    for(var ai = 0; ai < algos.length; ai++){
+      var kind = algos[ai];
+      var r = runBenchCapped(function(){ return makeAlgo(kind, g, sg.S, sg.G); },
+                             ALL_TEST_MIN_MS, ALL_TEST_CAP_MS);
+      res.push({ kind: kind, stats: r.stats, avgMs: r.avgMs });
+    }
+
+    var A = acc[plan.t.key];
+    var skey = plan.w + 'x' + plan.h;
+    var S = sizeAcc[skey];
+    for(var i2 = 0; i2 < res.length; i2++){
+      var x = res[i2];
+      updateRow(A[x.kind], x);
+      updateRow(overall[x.kind], x);
+      updateRow(S[x.kind], x);
+    }
+
+    var okList = [];
+    for(var i3 = 0; i3 < res.length; i3++) if(res[i3].stats.success) okList.push(res[i3]);
+    okList.sort(function(p, q){ return p.stats.uniqueVisited - q.stats.uniqueVisited; });
+    var nOk = okList.length;
+    for(var i4 = 0; i4 < nOk; i4++){
+      var rank = i4;
+      while(rank > 0 && okList[rank - 1].stats.uniqueVisited === okList[i4].stats.uniqueVisited) rank--;
+      var pts = nOk - 1 - rank;
+      A[okList[i4].kind].score += pts;
+      overall[okList[i4].kind].score += pts;
+      S[okList[i4].kind].score += pts;
+      if(rank === 0){
+        A[okList[i4].kind].wins++;
+        overall[okList[i4].kind].wins++;
+        S[okList[i4].kind].wins++;
+      }
+    }
+  }
+
+  function chunk(){
+    var t0 = performance.now();
+    while(pi < plans.length && performance.now() - t0 < 120){
+      runPlan(plans[pi]);
+      pi++;
+    }
+    if(pi < plans.length){
+      out.textContent = 'Running mass test (perfect mazes only): ' + pi + ' / ' + plans.length + ' mazes...';
+      setTimeout(chunk, 0);
+    } else {
+      out.textContent = formatMassAll(types, algos, sizes, acc, overall, sizeAcc, perType,
+                                      plans.length, performance.now() - startedAt);
+    }
+  }
+  setTimeout(chunk, 20);
+}
+
+function formatMassAll(types, algos, sizes, acc, overall, sizeAcc, perType, totalMazes, elapsed){
+  var L = [];
+  L.push('MASS TEST — PERFECT MAZES ONLY (DFS, Prim, Kruskal)');
+  L.push(algos.length + ' algos x ' + perType + ' mazes/type x ' + types.length +
+         ' types = ' + totalMazes + ' mazes');
+  L.push('sizes cycled: ' + sizes.map(function(s){ return s[0] + 'x' + s[1]; }).join(', ') +
+         '   cap: ' + ALL_TEST_CAP_MS + 'ms/algo-run');
+  L.push('wall: ' + fmtTime(elapsed) +
+         '   (score = rank pts among successful algos; wins = fewest unique cells)');
+  L.push('');
+
+  L.push('OVERALL (averages per maze; capped = runs that hit time cap)');
+  L.push(padR('algo', 6) + padLft('ok', 10) + padLft('capped', 8) + padLft('wins', 6) + padLft('score', 8)
+       + padLft('time', 10) + padLft('exp', 8) + padLft('uniq', 8)
+       + padLft('mem', 8) + padLft('path', 7));
+  L.push(repStr('-', 79));
+  for(var i = 0; i < algos.length; i++){
+    var a = overall[algos[i]];
+    L.push(padR(algos[i], 6)
+         + padLft(a.ok + '/' + a.n, 10)
+         + padLft(a.capped, 8)
+         + padLft(a.wins, 6)
+         + padLft(Math.round(a.score), 8)
+         + padLft(fmtTime(a.time / a.n), 10)
+         + padLft(Math.round(a.exp / a.n), 8)
+         + padLft(Math.round(a.uniq / a.n), 8)
+         + padLft(fmtBytesShort(a.mem / a.n), 8)
+         + padLft(a.pathN ? Math.round(a.pathSum / a.pathN) : '-', 7));
+  }
+
+  L.push('');
+  L.push('BY TYPE — wins (avg unique cells touched)');
+  var hdr = padR('type', 10);
+  for(var j = 0; j < algos.length; j++) hdr += padLft(algos[j], 13);
+  L.push(hdr);
+  L.push(repStr('-', 10 + 13 * algos.length));
+  for(var ti = 0; ti < types.length; ti++){
+    var line = padR(types[ti].name, 10);
+    for(var j2 = 0; j2 < algos.length; j2++){
+      var b = acc[types[ti].key][algos[j2]];
+      line += padLft(b.wins + '(' + Math.round(b.uniq / Math.max(1,b.n)) + ')', 13);
+    }
+    L.push(line);
+  }
+
+  L.push('');
+  L.push('BY SIZE — wins (avg unique cells touched)');
+  var hdr2 = padR('size', 10);
+  for(var j3 = 0; j3 < algos.length; j3++) hdr2 += padLft(algos[j3], 13);
+  L.push(hdr2);
+  L.push(repStr('-', 10 + 13 * algos.length));
+  for(var si = 0; si < sizes.length; si++){
+    var sk2 = sizes[si][0] + 'x' + sizes[si][1];
+    var line2 = padR(sk2, 10);
+    for(var j4 = 0; j4 < algos.length; j4++){
+      var c = sizeAcc[sk2][algos[j4]];
+      line2 += padLft(c.wins + '(' + Math.round(c.uniq / Math.max(1, c.n)) + ')', 13);
+    }
+    L.push(line2);
+  }
+
+  return L.join('\n');
 }
 
 document.getElementById('hLeft').innerText = LEFT_ALGO;
