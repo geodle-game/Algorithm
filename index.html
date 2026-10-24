@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LSB vs A* vs DFS vs SCS vs TSCS</title>
+<title>LSB vs A* vs DFS vs SCS vs TSCS vs WI vs WH</title>
 <style>
   body { background:#111; color:#eee; font-family: monospace; margin:0; padding:12px; }
   h2 { margin: 4px 0; font-size: 15px; }
@@ -60,10 +60,12 @@
   <span style="color:#888;font-size:12px;margin-right:6px;">Left:</span>
   <select id="leftSel" onchange="changeAlgo('left', this.value)">
     <option selected>A*</option><option>LSB</option><option>DFS</option><option>SCS</option><option>TSCS</option>
+    <option>WI</option><option>WH-L</option><option>WH-R</option>
   </select>
   <span style="color:#888;font-size:12px;margin:0 8px 0 16px;">Right:</span>
   <select id="rightSel" onchange="changeAlgo('right', this.value)">
     <option>A*</option><option>LSB</option><option>DFS</option><option>SCS</option><option selected>TSCS</option>
+    <option>WI</option><option>WH-L</option><option>WH-R</option>
   </select>
 </div>
 
@@ -1327,6 +1329,344 @@ TSCS.prototype.step = function(budget){
   this.algMs += performance.now() - t0;
 };
 
+// =============== Wall Inference (WI) ===============
+//
+// Phases:
+//   1. analyzing   — for each open cell, count adjacent passages; note its walls
+//   2. pruning     — iteratively remove leaf cells (activeDegree <= 1) that are
+//                    neither start nor goal; cascade to their surviving neighbor
+//   3. reconstructing — BFS from start through the pruned graph to goal
+//
+// For a perfect maze, pruning removes every passage not on the unique start->goal
+// path, so BFS finds exactly that path. For loopy mazes, pruning removes dead
+// ends but leaves loops intact; the BFS then picks a valid (shortest) route.
+//
+// This is the "passage-graph leaf pruning" baseline permitted by the spec.
+// A pure wall-geometry variant (dual-graph traversal) was intentionally not
+// implemented here; the analysis phase does inspect wall geometry to build
+// the passage graph, and the reported `wallChecks` is the number of wall-side
+// probes performed during that analysis.
+function WI(g, start, goal){
+  this.kind = 'wi';
+  this.grid = g; this.start = start; this.goal = goal;
+  this.W = g[0].length; this.H = g.length;
+  var W = this.W, H = this.H, N = W*H;
+  this.N = N;
+  this.sk = start[1]*W + start[0];
+  this.gk = goal[1]*W + goal[0];
+
+  this.visited  = new Uint8Array(N);
+  this.dead     = new Uint8Array(N);
+  this.expanded = new Uint8Array(N);
+  this.frontier = new Uint8Array(N);
+  this.pruned   = new Uint8Array(N);
+  this.degree   = new Uint8Array(N);
+
+  this._visitedCount = 0;
+  this._expandedCount = 0;
+  this._frontierCount = 0;
+  this._generatedCount = 0;
+
+  this.phase = 'analyzing';
+  this.phaseIdx = 0;
+  this.scanList = [];
+  var wallCells = 0;
+  for(var i = 0; i < N; i++){
+    var x = i % W, y = (i - x) / W;
+    if(g[y][x] === 0) this.scanList.push(i);
+    else wallCells++;
+  }
+  this.wallCellsTotal = wallCells;
+  this.wallSegmentsInspected = 0;
+
+  this.pruneQueue = [];
+  this.pruneHead = 0;
+  this.cellsPruned = 0;
+
+  this.reconCame = new Map();
+  this.reconQ = [];
+  this.reconHead = 0;
+
+  this.done = false; this.exhausted = false; this.path = null; this.algMs = 0;
+  this._recording = false;
+  this._deltaVisited = []; this._deltaFrontier = []; this._deltaFrontierRemoved = []; this._deltaDead = [];
+  this._pathValid = undefined; this._pathReason = undefined;
+
+  // Animation / mass-test scheduling
+  this.recordBudget = Math.max(1, Math.min(32, Math.ceil(N / 2500)));
+  this.massBudget = 32;
+
+  if(this.sk === this.gk){
+    this.done = true;
+    this.path = [[start[0], start[1]]];
+  }
+}
+WI.prototype._markVisited = function(k){
+  if(!this.visited[k]){
+    this.visited[k] = 1;
+    this._visitedCount++;
+    if(this._recording) this._deltaVisited.push(k);
+  }
+};
+WI.prototype.step = function(budget){
+  var t0 = performance.now();
+  var spent = 0;
+  var W = this.W, H = this.H, g = this.grid;
+  while(spent < budget && !this.done){
+    if(this.phase === 'analyzing'){
+      if(this.phaseIdx >= this.scanList.length){
+        this.phase = 'pruning';
+        continue;
+      }
+      var k = this.scanList[this.phaseIdx++];
+      var x = k % W, y = (k - x) / W;
+      var d = 0;
+      for(var di = 0; di < 4; di++){
+        var nx = x + N4[di][0], ny = y + N4[di][1];
+        if(nx < 0 || nx >= W || ny < 0 || ny >= H){
+          this.wallSegmentsInspected++;
+          continue;
+        }
+        if(g[ny][nx] !== 0){
+          this.wallSegmentsInspected++;
+        } else {
+          d++;
+        }
+      }
+      this.degree[k] = d;
+      this._markVisited(k);
+      if(d <= 1 && k !== this.sk && k !== this.gk){
+        this.pruneQueue.push(k);
+      }
+      spent++;
+    } else if(this.phase === 'pruning'){
+      if(this.pruneHead >= this.pruneQueue.length){
+        this.reconCame.set(this.sk, -1);
+        this.reconQ.push(this.sk);
+        this.reconHead = 0;
+        if(!this.frontier[this.sk]){
+          this.frontier[this.sk] = 1;
+          this._frontierCount++;
+          if(this._recording) this._deltaFrontier.push(this.sk);
+        }
+        this.phase = 'reconstructing';
+        continue;
+      }
+      var pk = this.pruneQueue[this.pruneHead++];
+      if(this.pruned[pk] || pk === this.sk || pk === this.gk) continue;
+      var px = pk % W, py = (pk - px) / W;
+      var active = 0, lastN = -1;
+      for(var di = 0; di < 4; di++){
+        var nx = px + N4[di][0], ny = py + N4[di][1];
+        if(nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+        if(g[ny][nx] !== 0) continue;
+        var nk = ny*W + nx;
+        if(this.pruned[nk]) continue;
+        active++;
+        lastN = nk;
+      }
+      if(active > 1) continue;
+      this.pruned[pk] = 1;
+      this.cellsPruned++;
+      if(!this.dead[pk]){
+        this.dead[pk] = 1;
+        if(this._recording) this._deltaDead.push(pk);
+      }
+      this._markVisited(pk);
+      this.expanded[pk] = 1;
+      this._expandedCount++;
+      if(lastN >= 0 && lastN !== this.sk && lastN !== this.gk){
+        this.pruneQueue.push(lastN);
+      }
+      spent++;
+    } else if(this.phase === 'reconstructing'){
+      if(this.reconHead >= this.reconQ.length){
+        this.done = true;
+        this.exhausted = true;
+        break;
+      }
+      var ck = this.reconQ[this.reconHead++];
+      if(this.frontier[ck]){
+        this.frontier[ck] = 0;
+        this._frontierCount--;
+        if(this._recording) this._deltaFrontierRemoved.push(ck);
+      }
+      this.expanded[ck] = 1;
+      this._expandedCount++;
+      this._markVisited(ck);
+      if(ck === this.gk){
+        this._reconstructPath();
+        this.done = true;
+        break;
+      }
+      var cx = ck % W, cy = (ck - cx) / W;
+      for(var di2 = 0; di2 < 4; di2++){
+        var nx2 = cx + N4[di2][0], ny2 = cy + N4[di2][1];
+        if(nx2 < 0 || nx2 >= W || ny2 < 0 || ny2 >= H) continue;
+        if(g[ny2][nx2] !== 0) continue;
+        var nk2 = ny2*W + nx2;
+        if(this.pruned[nk2]) continue;
+        if(this.reconCame.has(nk2)) continue;
+        this.reconCame.set(nk2, ck);
+        this.reconQ.push(nk2);
+        if(!this.frontier[nk2]){
+          this.frontier[nk2] = 1;
+          this._frontierCount++;
+          if(this._recording) this._deltaFrontier.push(nk2);
+        }
+      }
+      spent++;
+    } else {
+      break;
+    }
+  }
+  this.algMs += performance.now() - t0;
+};
+WI.prototype._reconstructPath = function(){
+  var path = [];
+  var c = this.gk;
+  var guard = 0;
+  while(c !== -1 && c !== undefined && guard < this.N + 4){
+    var x = c % this.W, y = (c - x) / this.W;
+    path.push([x, y]);
+    c = this.reconCame.get(c);
+    guard++;
+  }
+  path.reverse();
+  this.path = path;
+};
+
+// =============== Wall Hugger (WH) ===============
+//
+// Left-hand / right-hand wall follower. Heading is encoded as:
+//   0 = east  (+x)      1 = south (+y)      2 = west (-x)      3 = north (-y)
+// Left-hand rule tries directions in order  [left, straight, right, back].
+// Right-hand rule tries                 [right, straight, left, back].
+// Stops at goal; loops are detected via (cell, heading) states.
+// Wall following is guaranteed to solve every *perfect* maze whose goal is in
+// the same connected wall component as the start corridor; it is NOT
+// guaranteed on arbitrary loopy or disconnected mazes.
+function WH(g, start, goal, mode){
+  this.kind = 'wh';
+  this.mode = mode || 'left';
+  this.grid = g; this.start = start; this.goal = goal;
+  this.W = g[0].length; this.H = g.length;
+  var W = this.W, H = this.H, N = W*H;
+  this.N = N;
+  this.sk = start[1]*W + start[0];
+  this.gk = goal[1]*W + goal[0];
+
+  var DIRS = [[1,0],[0,1],[-1,0],[0,-1]];
+
+  this.pos = [start[0], start[1]];
+  this.heading = 0;
+  for(var di = 0; di < 4; di++){
+    var nx = start[0] + DIRS[di][0], ny = start[1] + DIRS[di][1];
+    if(nx >= 0 && nx < W && ny >= 0 && ny < H && g[ny][nx] === 0){ this.heading = di; break; }
+  }
+  this.trail = [[start[0], start[1]]];
+
+  this.visitedStates = new Uint8Array(N*4);
+  this.visitedStates[this.sk*4 + this.heading] = 1;
+  this.stateVisits = 1;
+  this.steps = 0;
+  this.loopDetected = false;
+  this.capped = false;
+  this.stopReason = null;
+  this.maxSteps = 4 * N;
+
+  this.visited  = new Uint8Array(N);
+  this.expanded = new Uint8Array(N);
+  this.visited[this.sk] = 1;
+  this._visitedCount = 1;
+  this._expandedCount = 0;
+  this._frontierCount = 0;
+  this._generatedCount = 1;
+
+  this.done = false; this.exhausted = false; this.path = null; this.algMs = 0;
+  this._recording = false;
+  this._deltaVisited = []; this._deltaFrontier = []; this._deltaFrontierRemoved = []; this._deltaDead = [];
+  this._pathValid = undefined; this._pathReason = undefined;
+
+  this.recordBudget = Math.max(1, Math.min(32, Math.ceil(N / 2500)));
+  this.massBudget = 32;
+
+  if(this.sk === this.gk){
+    this.done = true;
+    this.path = [[start[0], start[1]]];
+  }
+}
+WH.prototype.getParked = function(){
+  return [this.pos[1] * this.W + this.pos[0]];
+};
+WH.prototype.step = function(budget){
+  var t0 = performance.now();
+  var spent = 0;
+  var W = this.W, H = this.H, g = this.grid;
+  var rec = this._recording;
+  var DIRS = [[1,0],[0,1],[-1,0],[0,-1]];
+
+  while(spent < budget && !this.done){
+    if(this.steps >= this.maxSteps){
+      this.done = true; this.capped = true; this.stopReason = 'step-limit';
+      break;
+    }
+    var order;
+    if(this.mode === 'left'){
+      order = [(this.heading + 3) % 4, this.heading, (this.heading + 1) % 4, (this.heading + 2) % 4];
+    } else {
+      order = [(this.heading + 1) % 4, this.heading, (this.heading + 3) % 4, (this.heading + 2) % 4];
+    }
+
+    var moved = false;
+    var newK = -1;
+    for(var oi = 0; oi < 4; oi++){
+      var dir = order[oi];
+      var nx = this.pos[0] + DIRS[dir][0];
+      var ny = this.pos[1] + DIRS[dir][1];
+      if(nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+      if(g[ny][nx] !== 0) continue;
+      var nk = ny*W + nx;
+      var stateKey = nk * 4 + dir;
+      if(this.visitedStates[stateKey]){
+        this.loopDetected = true;
+        break;
+      }
+      // commit
+      this.pos = [nx, ny];
+      this.heading = dir;
+      this.steps++;
+      this.trail.push([nx, ny]);
+      this.visitedStates[stateKey] = 1;
+      this.stateVisits++;
+      if(!this.visited[nk]){
+        this.visited[nk] = 1;
+        this._visitedCount++;
+        if(rec) this._deltaVisited.push(nk);
+      }
+      this.expanded[nk] = 1;
+      this._expandedCount++;
+      moved = true;
+      newK = nk;
+      break;
+    }
+
+    if(!moved){
+      this.done = true; this.exhausted = true;
+      this.stopReason = this.loopDetected ? 'loop' : 'stuck';
+      break;
+    }
+    if(newK === this.gk){
+      this.done = true;
+      this.path = this.trail.slice();
+      this.stopReason = 'goal';
+      break;
+    }
+    spent++;
+  }
+  this.algMs += performance.now() - t0;
+};
+
 // =============== memory estimation ===============
 var BYTES_OBJ_HEADER = 48;
 var BYTES_SMALL_ARRAY = 32;
@@ -1399,11 +1739,30 @@ function estimateTSCSBytes(t){
   for(var j = 0; j < t.crossEdges.length; j++) bytes += t.crossEdges[j].length * BYTES_PER_NUMBER;
   return bytes;
 }
+function estimateWIBytes(w){
+  var bytes = 0;
+  bytes += w.visited.byteLength + w.dead.byteLength + w.expanded.byteLength;
+  bytes += w.frontier.byteLength + w.pruned.byteLength + w.degree.byteLength;
+  bytes += w.scanList.length * BYTES_PER_NUMBER;
+  bytes += w.pruneQueue.length * BYTES_PER_NUMBER;
+  bytes += w.reconQ.length * BYTES_PER_NUMBER;
+  bytes += w.reconCame.size * BYTES_OBJECT_MAP_ENTRY;
+  return bytes;
+}
+function estimateWHBytes(w){
+  var bytes = 0;
+  bytes += w.visited.byteLength + w.expanded.byteLength;
+  bytes += w.visitedStates.byteLength;
+  bytes += w.trail.length * BYTES_PER_NUMBER;
+  return bytes;
+}
 function estimateBytes(algo){
   if(algo.kind === 'lsb') return estimateLSBBytes(algo);
   if(algo.kind === 'dfs') return estimateDFSBytes(algo);
   if(algo.kind === 'scs') return estimateSCSBytes(algo);
   if(algo.kind === 'tscs') return estimateTSCSBytes(algo);
+  if(algo.kind === 'wi') return estimateWIBytes(algo);
+  if(algo.kind === 'wh') return estimateWHBytes(algo);
   return estimateAStarBytes(algo);
 }
 
@@ -1413,6 +1772,9 @@ function makeAlgo(kind, g, start, goal){
   if(kind === 'DFS') return new DFS(g, start, goal);
   if(kind === 'SCS') return new SCS(g, start, goal);
   if(kind === 'TSCS') return new TSCS(g, start, goal);
+  if(kind === 'WI') return new WI(g, start, goal);
+  if(kind === 'WH-L') return new WH(g, start, goal, 'left');
+  if(kind === 'WH-R') return new WH(g, start, goal, 'right');
   throw new Error('unknown algo ' + kind);
 }
 
@@ -1433,7 +1795,9 @@ function getStats(algo){
     success: algo.done && validPath.ok, exhausted: !!algo.exhausted, done: algo.done,
     frontier: algo._frontierCount,
     memBytes: estimateBytes(algo),
-    algMs: algo.algMs, isLSB: algo.kind === 'lsb', isSCS: algo.kind === 'scs', isTSCS: algo.kind === 'tscs'
+    algMs: algo.algMs,
+    isLSB: algo.kind === 'lsb', isSCS: algo.kind === 'scs',
+    isTSCS: algo.kind === 'tscs', isWI: algo.kind === 'wi', isWH: algo.kind === 'wh'
   };
   if(algo.kind === 'lsb'){
     stats.backtracks = algo.backtracks; stats.parks = algo.parks; stats.resumes = algo.resumes;
@@ -1461,6 +1825,20 @@ function getStats(algo){
     stats.tscsRevealed = 0;
     for(var i = 0; i < algo._revealedTiles.length; i++) if(algo._revealedTiles[i]) stats.tscsRevealed++;
   }
+  if(algo.kind === 'wi'){
+    stats.wiPhase = algo.phase;
+    stats.wiCellsPruned = algo.cellsPruned;
+    stats.wiWallSegmentsInspected = algo.wallSegmentsInspected;
+    stats.wiWallCellsTotal = algo.wallCellsTotal;
+  }
+  if(algo.kind === 'wh'){
+    stats.whMode = algo.mode;
+    stats.whSteps = algo.steps;
+    stats.whStateVisits = algo.stateVisits;
+    stats.whLoopDetected = algo.loopDetected;
+    stats.whCapped = algo.capped;
+    stats.whStopReason = algo.stopReason;
+  }
   return stats;
 }
 
@@ -1468,17 +1846,27 @@ function getStats(algo){
 function recordFrames(algo){
   var frames = [];
   var isLSB = algo.kind === 'lsb';
+  var isWH = algo.kind === 'wh';
+  var budget = algo.recordBudget || RECORD_BUDGET;
+  function parkedOf(a){
+    if(isLSB && a.parked) return a.parked.map(function(b){ return b.k; });
+    if(isWH && a.getParked) return a.getParked();
+    return null;
+  }
   algo._recording = true;
   algo._deltaVisited = []; algo._deltaFrontier = []; algo._deltaFrontierRemoved = []; algo._deltaDead = [];
   frames.push({
-    addVisited: keysOf(algo.visited), addFrontier: keysOf(algo.frontier),
-    remFrontier: [], addDead: algo.dead ? keysOf(algo.dead) : [],
-    path: null, parked: isLSB && algo.parked ? algo.parked.map(function(b){ return b.k; }) : null,
+    addVisited: keysOf(algo.visited),
+    addFrontier: keysOf(algo.frontier),
+    remFrontier: [],
+    addDead: algo.dead ? keysOf(algo.dead) : [],
+    path: null,
+    parked: parkedOf(algo),
     stats: getStats(algo)
   });
   var recorded = 1;
   while(!algo.done && recorded < RECORD_MAX_FRAMES){
-    algo.step(RECORD_BUDGET);
+    algo.step(budget);
     var addVisited = algo._deltaVisited; algo._deltaVisited = [];
     var addFrontier = algo._deltaFrontier; algo._deltaFrontier = [];
     var remFrontier = algo._deltaFrontierRemoved; algo._deltaFrontierRemoved = [];
@@ -1486,7 +1874,7 @@ function recordFrames(algo){
     frames.push({
       addVisited: addVisited, addFrontier: addFrontier, remFrontier: remFrontier, addDead: addDead,
       path: algo.path ? algo.path.slice() : null,
-      parked: isLSB && algo.parked ? algo.parked.map(function(b){ return b.k; }) : null,
+      parked: parkedOf(algo),
       stats: getStats(algo)
     });
     recorded++;
@@ -1588,6 +1976,18 @@ function fmtStats(stats){
     s += 'portals: <b>' + stats.tscsPortals + '</b>  expanded: <b>' + stats.tscsPortalExpansions + '</b><br>';
     s += 'tiles revealed: <b>' + stats.tscsRevealed + '/' + stats.tscsTiles + '</b><br>';
     s += 'tileBFS calls: <b>' + stats.tscsTileBfsCalls + '</b>  cellsBFSed: <b>' + stats.tscsCellsBfsed + '</b><br>';
+  }
+  if(stats.isWI){
+    s += 'phase: <b>' + stats.wiPhase + '</b>  pruned: <b>' + stats.wiCellsPruned + '</b><br>';
+    s += 'wall segments checked: <b>' + stats.wiWallSegmentsInspected + '</b> / ' + stats.wiWallCellsTotal + ' wall cells<br>';
+  }
+  if(stats.isWH){
+    s += 'mode: <b>' + stats.whMode + '</b>  steps: <b>' + stats.whSteps + '</b><br>';
+    s += 'state visits: <b>' + stats.whStateVisits + '</b><br>';
+    if(stats.whStopReason) s += 'stop: <b>' + stats.whStopReason + '</b>';
+    if(stats.whLoopDetected) s += ' <span style="color:#f88">(loop)</span>';
+    if(stats.whCapped) s += ' <span style="color:#f88">(capped)</span>';
+    s += '<br>';
   }
   s += 'done: <b>' + stats.done + '</b>';
   if(stats.exhausted) s += ' <span style="color:#f88">(exhausted)</span>';
@@ -1724,8 +2124,9 @@ var lastSeeds = null, lastN = 0;
 
 function runOneOnce(factory){
   var algo = factory();
+  var budget = algo.massBudget || MASS_BUDGET;
   var iters = 0;
-  while(!algo.done && iters < MASS_MAX_ITERS){ algo.step(MASS_BUDGET); iters++; }
+  while(!algo.done && iters < MASS_MAX_ITERS){ algo.step(budget); iters++; }
   return { stats: getStats(algo), algMs: algo.algMs };
 }
 function runBench(factory){
@@ -1841,7 +2242,7 @@ function massTest(reuse, N){
 }
 
 // =============== mass test: ALL algorithms on PERFECT MAZES ===============
-var ALL_ALGO_KINDS = ['A*', 'LSB', 'DFS', 'SCS', 'TSCS'];
+var ALL_ALGO_KINDS = ['A*', 'LSB', 'DFS', 'SCS', 'TSCS', 'WI', 'WH-L', 'WH-R'];
 
 var ALL_TEST_TYPES = [
   { key:'maze_dfs',     name:'MazeDFS'  },
@@ -1883,11 +2284,12 @@ function newStatRow(){
 
 function runOneCapped(factory, capMs){
   var algo = factory();
+  var budget = algo.massBudget || MASS_BUDGET;
   var iters = 0;
   var t0 = performance.now();
   var capped = false;
   while(!algo.done && iters < MASS_MAX_ITERS){
-    algo.step(MASS_BUDGET);
+    algo.step(budget);
     iters++;
     if((iters & 31) === 0 && performance.now() - t0 > capMs){ capped = true; break; }
   }
