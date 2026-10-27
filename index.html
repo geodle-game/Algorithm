@@ -1330,22 +1330,6 @@ TSCS.prototype.step = function(budget){
 };
 
 // =============== Wall Inference (WI) ===============
-//
-// Phases:
-//   1. analyzing   — for each open cell, count adjacent passages; note its walls
-//   2. pruning     — iteratively remove leaf cells (activeDegree <= 1) that are
-//                    neither start nor goal; cascade to their surviving neighbor
-//   3. reconstructing — BFS from start through the pruned graph to goal
-//
-// For a perfect maze, pruning removes every passage not on the unique start->goal
-// path, so BFS finds exactly that path. For loopy mazes, pruning removes dead
-// ends but leaves loops intact; the BFS then picks a valid (shortest) route.
-//
-// This is the "passage-graph leaf pruning" baseline permitted by the spec.
-// A pure wall-geometry variant (dual-graph traversal) was intentionally not
-// implemented here; the analysis phase does inspect wall geometry to build
-// the passage graph, and the reported `wallChecks` is the number of wall-side
-// probes performed during that analysis.
 function WI(g, start, goal){
   this.kind = 'wi';
   this.grid = g; this.start = start; this.goal = goal;
@@ -1378,6 +1362,9 @@ function WI(g, start, goal){
   }
   this.wallCellsTotal = wallCells;
   this.wallSegmentsInspected = 0;
+  this.analysisCells  = 0;
+  this.neighborChecks = 0;
+  this.reconCells     = 0;
 
   this.pruneQueue = [];
   this.pruneHead = 0;
@@ -1392,7 +1379,6 @@ function WI(g, start, goal){
   this._deltaVisited = []; this._deltaFrontier = []; this._deltaFrontierRemoved = []; this._deltaDead = [];
   this._pathValid = undefined; this._pathReason = undefined;
 
-  // Animation / mass-test scheduling
   this.recordBudget = Math.max(1, Math.min(32, Math.ceil(N / 2500)));
   this.massBudget = 32;
 
@@ -1419,9 +1405,11 @@ WI.prototype.step = function(budget){
         continue;
       }
       var k = this.scanList[this.phaseIdx++];
+      this.analysisCells++;
       var x = k % W, y = (k - x) / W;
       var d = 0;
       for(var di = 0; di < 4; di++){
+        this.neighborChecks++;
         var nx = x + N4[di][0], ny = y + N4[di][1];
         if(nx < 0 || nx >= W || ny < 0 || ny >= H){
           this.wallSegmentsInspected++;
@@ -1486,6 +1474,7 @@ WI.prototype.step = function(budget){
         break;
       }
       var ck = this.reconQ[this.reconHead++];
+      this.reconCells++;
       if(this.frontier[ck]){
         this.frontier[ck] = 0;
         this._frontierCount--;
@@ -1537,15 +1526,6 @@ WI.prototype._reconstructPath = function(){
 };
 
 // =============== Wall Hugger (WH) ===============
-//
-// Left-hand / right-hand wall follower. Heading is encoded as:
-//   0 = east  (+x)      1 = south (+y)      2 = west (-x)      3 = north (-y)
-// Left-hand rule tries directions in order  [left, straight, right, back].
-// Right-hand rule tries                 [right, straight, left, back].
-// Stops at goal; loops are detected via (cell, heading) states.
-// Wall following is guaranteed to solve every *perfect* maze whose goal is in
-// the same connected wall component as the start corridor; it is NOT
-// guaranteed on arbitrary loopy or disconnected mazes.
 function WH(g, start, goal, mode){
   this.kind = 'wh';
   this.mode = mode || 'left';
@@ -1632,7 +1612,6 @@ WH.prototype.step = function(budget){
         this.loopDetected = true;
         break;
       }
-      // commit
       this.pos = [nx, ny];
       this.heading = dir;
       this.steps++;
@@ -1826,10 +1805,13 @@ function getStats(algo){
     for(var i = 0; i < algo._revealedTiles.length; i++) if(algo._revealedTiles[i]) stats.tscsRevealed++;
   }
   if(algo.kind === 'wi'){
-    stats.wiPhase = algo.phase;
-    stats.wiCellsPruned = algo.cellsPruned;
+    stats.wiPhase               = algo.phase;
+    stats.wiCellsPruned         = algo.cellsPruned;
     stats.wiWallSegmentsInspected = algo.wallSegmentsInspected;
-    stats.wiWallCellsTotal = algo.wallCellsTotal;
+    stats.wiWallCellsTotal      = algo.wallCellsTotal;
+    stats.wiAnalysisCells       = algo.analysisCells;
+    stats.wiNeighborChecks      = algo.neighborChecks;
+    stats.wiReconCells          = algo.reconCells;
   }
   if(algo.kind === 'wh'){
     stats.whMode = algo.mode;
@@ -1838,6 +1820,13 @@ function getStats(algo){
     stats.whLoopDetected = algo.loopDetected;
     stats.whCapped = algo.capped;
     stats.whStopReason = algo.stopReason;
+  }
+  // Fair route-finding metric: for WI, only the reconstruction phase counts;
+  // for everything else, search cells == total unique cells touched.
+  if(algo.kind === 'wi'){
+    stats.searchCells = algo.reconCells;
+  } else {
+    stats.searchCells = algo._visitedCount;
   }
   return stats;
 }
@@ -1980,6 +1969,8 @@ function fmtStats(stats){
   if(stats.isWI){
     s += 'phase: <b>' + stats.wiPhase + '</b>  pruned: <b>' + stats.wiCellsPruned + '</b><br>';
     s += 'wall segments checked: <b>' + stats.wiWallSegmentsInspected + '</b> / ' + stats.wiWallCellsTotal + ' wall cells<br>';
+    s += 'analysis cells: <b>' + stats.wiAnalysisCells + '</b>  neighbour checks: <b>' + stats.wiNeighborChecks + '</b><br>';
+    s += 'recon cells (search): <b>' + stats.wiReconCells + '</b><br>';
   }
   if(stats.isWH){
     s += 'mode: <b>' + stats.whMode + '</b>  steps: <b>' + stats.whSteps + '</b><br>';
@@ -2119,24 +2110,113 @@ function loop(now){
   renderCurrent();
 }
 
+// =============== BFS shortest path (trusted baseline) ===============
+// BFS shortest path length in cells (start and goal included).
+// Returns null if no path exists; returns 1 if start == goal.
+function bfsShortestPath(g, start, goal){
+  var W = g[0].length, H = g.length;
+  var sk = start[1]*W + start[0], gk = goal[1]*W + goal[0];
+  if(g[start[1]][start[0]] !== 0 || g[goal[1]][goal[0]] !== 0) return null;
+  if(sk === gk) return 1;
+  var dist = new Int32Array(W*H);
+  for(var i = 0; i < dist.length; i++) dist[i] = -1;
+  dist[sk] = 0;
+  var q = new Int32Array(W*H);
+  var head = 0, tail = 0;
+  q[tail++] = sk;
+  while(head < tail){
+    var ck = q[head++];
+    var cx = ck % W, cy = (ck - cx) / W;
+    for(var di = 0; di < 4; di++){
+      var nx = cx + N4[di][0], ny = cy + N4[di][1];
+      if(nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+      if(g[ny][nx] !== 0) continue;
+      var nk = ny*W + nx;
+      if(dist[nk] !== -1) continue;
+      dist[nk] = dist[ck] + 1;
+      if(nk === gk) return dist[nk] + 1;
+      q[tail++] = nk;
+    }
+  }
+  return null;
+}
+
 // =============== mass test (2 algorithms, mixed types) ===============
 var lastSeeds = null, lastN = 0;
 
 function runOneOnce(factory){
+  var t0 = performance.now();
   var algo = factory();
+  var ctorMs = performance.now() - t0;
   var budget = algo.massBudget || MASS_BUDGET;
   var iters = 0;
   while(!algo.done && iters < MASS_MAX_ITERS){ algo.step(budget); iters++; }
-  return { stats: getStats(algo), algMs: algo.algMs };
+  var totalMs = performance.now() - t0;
+  var stats = getStats(algo);
+  stats.ctorMs  = ctorMs;
+  stats.totalMs = totalMs;
+  return { stats: stats, algMs: algo.algMs, totalMs: totalMs, ctorMs: ctorMs };
 }
+
 function runBench(factory){
-  var totalMs = 0, reps = 0, last = null;
+  var totalMs = 0, totalCtorMs = 0, totalAlgMs = 0, reps = 0, last = null;
   while(reps < MASS_MAX_REPS){
     last = runOneOnce(factory);
-    totalMs += last.algMs; reps++;
-    if(totalMs >= MASS_MIN_TIME_MS) break;
+    totalMs     += last.totalMs;
+    totalCtorMs += last.ctorMs;
+    totalAlgMs  += last.algMs;
+    reps++;
+    if(totalAlgMs >= MASS_MIN_TIME_MS) break;
   }
-  return { stats: last.stats, avgMs: totalMs / reps, reps: reps };
+  return {
+    stats: last.stats,
+    avgMs:      totalAlgMs  / reps,
+    avgTotalMs: totalMs     / reps,
+    avgCtorMs:  totalCtorMs / reps,
+    reps: reps
+  };
+}
+
+function runOneCapped(factory, capMs){
+  var t0 = performance.now();
+  var algo = factory();
+  var ctorMs = performance.now() - t0;
+  var budget = algo.massBudget || MASS_BUDGET;
+  var iters = 0;
+  var capped = false;
+  while(!algo.done && iters < MASS_MAX_ITERS){
+    algo.step(budget);
+    iters++;
+    if((iters & 31) === 0 && performance.now() - t0 > capMs){ capped = true; break; }
+  }
+  var totalMs = performance.now() - t0;
+  var stats = getStats(algo);
+  stats.capped  = capped;
+  stats.ctorMs  = ctorMs;
+  stats.totalMs = totalMs;
+  return { stats: stats, algMs: algo.algMs, totalMs: totalMs, ctorMs: ctorMs };
+}
+
+function runBenchCapped(factory, minMs, capMs){
+  var totalMs = 0, totalCtorMs = 0, totalAlgMs = 0, reps = 0, last = null;
+  var anyCapped = false;
+  while(reps < MASS_MAX_REPS){
+    last = runOneCapped(factory, capMs);
+    totalMs     += last.totalMs;
+    totalCtorMs += last.ctorMs;
+    totalAlgMs  += last.algMs;
+    reps++;
+    if(last.stats.capped) anyCapped = true;
+    if(totalAlgMs >= minMs) break;
+  }
+  if(anyCapped) last.stats.capped = true;
+  return {
+    stats: last.stats,
+    avgMs:      totalAlgMs  / reps,
+    avgTotalMs: totalMs     / reps,
+    avgCtorMs:  totalCtorMs / reps,
+    reps: reps
+  };
 }
 
 function massTest(reuse, N){
@@ -2241,13 +2321,18 @@ function massTest(reuse, N){
   }, 30);
 }
 
-// =============== mass test: ALL algorithms on PERFECT MAZES ===============
+// =============== mass test: ALL algorithms on perfect + general mazes ===============
 var ALL_ALGO_KINDS = ['A*', 'LSB', 'DFS', 'SCS', 'TSCS', 'WI', 'WH-L', 'WH-R'];
 
+var ALL_TEST_SEED_BASE = 0xC0FFEE;   // fixed for reproducibility
+
 var ALL_TEST_TYPES = [
-  { key:'maze_dfs',     name:'MazeDFS'  },
-  { key:'maze_prim',    name:'MazePrim' },
-  { key:'maze_kruskal', name:'MazeKrsk' }
+  { key:'maze_dfs',     name:'MazeDFS',  perfect:true  },
+  { key:'maze_prim',    name:'MazePrim', perfect:true  },
+  { key:'maze_kruskal', name:'MazeKrsk', perfect:true  },
+  { key:'r020',         name:'Rand020',  perfect:false },
+  { key:'r030',         name:'Rand030',  perfect:false },
+  { key:'r038',         name:'Rand038',  perfect:false }
 ];
 
 var ALL_TEST_SIZES = [[60,30],[100,50],[150,75],[200,100],[300,150],[400,200]];
@@ -2265,6 +2350,9 @@ function genGridAtSize(key, seed, w, h){
   if(key === 'maze_dfs')          g = makeMazeDFS(seed);
   else if(key === 'maze_prim')    g = makeMazePrim(seed);
   else if(key === 'maze_kruskal') g = makeMazeKruskal(seed);
+  else if(key === 'r020')         g = makeRandom(0.20, seed);
+  else if(key === 'r030')         g = makeRandom(0.30, seed);
+  else if(key === 'r038')         g = makeRandom(0.38, seed);
   else                            g = makeOpen();
   W = oW; H = oH;
   return g;
@@ -2279,50 +2367,46 @@ function startGoalAtSize(key, w, h){
 }
 
 function newStatRow(){
-  return { n:0, ok:0, capped:0, wins:0, score:0, time:0, exp:0, uniq:0, mem:0, pathSum:0, pathN:0 };
+  return {
+    n:0, ok:0, capped:0, loop:0, stepCap:0, noPath:0, invalid:0, stuck:0,
+    wins:0, score:0, winsSch:0, scoreSch:0,
+    optimal:0, suboptimal:0,
+    time:0, totalTime:0, ctorTime:0,
+    exp:0, uniq:0, searchCells:0, mem:0, pathSum:0, pathN:0
+  };
 }
 
-function runOneCapped(factory, capMs){
-  var algo = factory();
-  var budget = algo.massBudget || MASS_BUDGET;
-  var iters = 0;
-  var t0 = performance.now();
-  var capped = false;
-  while(!algo.done && iters < MASS_MAX_ITERS){
-    algo.step(budget);
-    iters++;
-    if((iters & 31) === 0 && performance.now() - t0 > capMs){ capped = true; break; }
-  }
-  var stats = getStats(algo);
-  stats.capped = capped;
-  return { stats: stats, algMs: algo.algMs };
-}
-
-function runBenchCapped(factory, minMs, capMs){
-  var totalMs = 0, reps = 0, last = null;
-  var anyCapped = false;
-  while(reps < MASS_MAX_REPS){
-    last = runOneCapped(factory, capMs);
-    totalMs += last.algMs; reps++;
-    if(last.stats.capped) anyCapped = true;
-    if(totalMs >= minMs) break;
-  }
-  if(anyCapped) last.stats.capped = true;
-  return { stats: last.stats, avgMs: totalMs / reps, reps: reps };
-}
-
-function updateRow(row, x){
+function updateRow(row, x, bfsLen){
   row.n++;
-  row.time += x.avgMs;
-  row.exp += x.stats.expanded;
-  row.uniq += x.stats.uniqueVisited;
-  row.mem += x.stats.memBytes;
-  if(x.stats.capped) row.capped++;
+  row.time      += x.avgMs;
+  row.totalTime += x.avgTotalMs;
+  row.ctorTime  += x.avgCtorMs;
+  row.exp       += x.stats.expanded;
+  row.uniq      += x.stats.uniqueVisited;
+  row.searchCells += x.stats.searchCells;
+  row.mem       += x.stats.memBytes;
+
   if(x.stats.success){
     row.ok++;
     row.pathSum += x.stats.pathLen || 0;
     row.pathN++;
+    if(bfsLen !== null && bfsLen !== undefined){
+      if(x.stats.pathLen === bfsLen)      row.optimal++;
+      else if(x.stats.pathLen > bfsLen)   row.suboptimal++;
+    }
+    return;
   }
+  if(x.stats.capped){ row.capped++; return; }
+  if(x.stats.isWH){
+    var r = x.stats.whStopReason;
+    if(r === 'loop')       { row.loop++;    return; }
+    if(r === 'step-limit') { row.stepCap++; return; }
+    if(r === 'stuck')      { row.stuck++;   return; }
+    row.stuck++; return;
+  }
+  if(x.stats.exhausted){ row.noPath++; return; }
+  if(x.stats.done && !x.stats.pathValid){ row.invalid++; return; }
+  row.stuck++;
 }
 
 function massTestAll(perType){
@@ -2350,23 +2434,30 @@ function massTestAll(perType){
   for(var ti = 0; ti < types.length; ti++){
     for(var k = 0; k < perType; k++){
       var sz = sizes[k % sizes.length];
-      plans.push({ t: types[ti], w: sz[0], h: sz[1], seed: freshSeed() });
+      // Deterministic per-(type, index) seed — reproducible across runs.
+      var seed = (ALL_TEST_SEED_BASE
+                 ^ ((ti + 1) * 0x9E3779B1 >>> 0)
+                 ^ ((k  + 1) * 0x85EBCA6B >>> 0)) >>> 0;
+      plans.push({ t: types[ti], w: sz[0], h: sz[1], seed: seed });
     }
   }
 
   var pi = 0;
   var startedAt = performance.now();
-  out.textContent = 'Running mass test (perfect mazes only): 0 / ' + plans.length + ' mazes...';
+  out.textContent = 'Running mass test: 0 / ' + plans.length + ' mazes...';
 
   function runPlan(plan){
     var g  = genGridAtSize(plan.t.key, plan.seed, plan.w, plan.h);
     var sg = startGoalAtSize(plan.t.key, plan.w, plan.h);
+    var bfsLen = bfsShortestPath(g, sg.S, sg.G);
+
     var res = [];
     for(var ai = 0; ai < algos.length; ai++){
       var kind = algos[ai];
       var r = runBenchCapped(function(){ return makeAlgo(kind, g, sg.S, sg.G); },
                              ALL_TEST_MIN_MS, ALL_TEST_CAP_MS);
-      res.push({ kind: kind, stats: r.stats, avgMs: r.avgMs });
+      res.push({ kind: kind, stats: r.stats, avgMs: r.avgMs,
+                 avgTotalMs: r.avgTotalMs, avgCtorMs: r.avgCtorMs });
     }
 
     var A = acc[plan.t.key];
@@ -2374,11 +2465,12 @@ function massTestAll(perType){
     var S = sizeAcc[skey];
     for(var i2 = 0; i2 < res.length; i2++){
       var x = res[i2];
-      updateRow(A[x.kind], x);
-      updateRow(overall[x.kind], x);
-      updateRow(S[x.kind], x);
+      updateRow(A[x.kind],       x, bfsLen);
+      updateRow(overall[x.kind], x, bfsLen);
+      updateRow(S[x.kind],       x, bfsLen);
     }
 
+    // --- Score A: by uniqueVisited (unchanged, spec-compliant) ---
     var okList = [];
     for(var i3 = 0; i3 < res.length; i3++) if(res[i3].stats.success) okList.push(res[i3]);
     okList.sort(function(p, q){ return p.stats.uniqueVisited - q.stats.uniqueVisited; });
@@ -2396,6 +2488,23 @@ function massTestAll(perType){
         S[okList[i4].kind].wins++;
       }
     }
+
+    // --- Score B: by searchCells (parallel, fair route-finding metric) ---
+    var okListSch = okList.slice().sort(function(p, q){ return p.stats.searchCells - q.stats.searchCells; });
+    var nOkSch = okListSch.length;
+    for(var i5 = 0; i5 < nOkSch; i5++){
+      var rankSch = i5;
+      while(rankSch > 0 && okListSch[rankSch - 1].stats.searchCells === okListSch[i5].stats.searchCells) rankSch--;
+      var ptsSch = nOkSch - 1 - rankSch;
+      A[okListSch[i5].kind].scoreSch += ptsSch;
+      overall[okListSch[i5].kind].scoreSch += ptsSch;
+      S[okListSch[i5].kind].scoreSch += ptsSch;
+      if(rankSch === 0){
+        A[okListSch[i5].kind].winsSch++;
+        overall[okListSch[i5].kind].winsSch++;
+        S[okListSch[i5].kind].winsSch++;
+      }
+    }
   }
 
   function chunk(){
@@ -2405,7 +2514,7 @@ function massTestAll(perType){
       pi++;
     }
     if(pi < plans.length){
-      out.textContent = 'Running mass test (perfect mazes only): ' + pi + ' / ' + plans.length + ' mazes...';
+      out.textContent = 'Running mass test: ' + pi + ' / ' + plans.length + ' mazes...';
       setTimeout(chunk, 0);
     } else {
       out.textContent = formatMassAll(types, algos, sizes, acc, overall, sizeAcc, perType,
@@ -2417,63 +2526,153 @@ function massTestAll(perType){
 
 function formatMassAll(types, algos, sizes, acc, overall, sizeAcc, perType, totalMazes, elapsed){
   var L = [];
-  L.push('MASS TEST — PERFECT MAZES ONLY (DFS, Prim, Kruskal)');
+  var nPerfect = 0, nGeneral = 0;
+  for(var ti = 0; ti < types.length; ti++){ if(types[ti].perfect) nPerfect++; else nGeneral++; }
+
+  L.push('MASS TEST — ALL ALGORITHMS, PERFECT + GENERAL MAZES');
   L.push(algos.length + ' algos x ' + perType + ' mazes/type x ' + types.length +
          ' types = ' + totalMazes + ' mazes');
-  L.push('sizes cycled: ' + sizes.map(function(s){ return s[0] + 'x' + s[1]; }).join(', ') +
+  L.push('  perfect types: ' + nPerfect + '   general types: ' + nGeneral +
+         '   seed base: 0x' + ALL_TEST_SEED_BASE.toString(16));
+  L.push('  sizes: ' + sizes.map(function(s){ return s[0] + 'x' + s[1]; }).join(', ') +
          '   cap: ' + ALL_TEST_CAP_MS + 'ms/algo-run');
-  L.push('wall: ' + fmtTime(elapsed) +
-         '   (score = rank pts among successful algos; wins = fewest unique cells)');
+  L.push('  wall: ' + fmtTime(elapsed));
+  L.push('  tot = constructor + steps (fair); step = steps only; sch = search-only cells');
+  L.push('  score/wins  -> by uniqueVisited (unchanged primary rule)');
+  L.push('  sSch/wSch   -> by searchCells (fair route-finding comparison)');
+  L.push('  mem is a coarse estimate, not a measured peak');
   L.push('');
 
-  L.push('OVERALL (averages per maze; capped = runs that hit time cap)');
-  L.push(padR('algo', 6) + padLft('ok', 10) + padLft('capped', 8) + padLft('wins', 6) + padLft('score', 8)
-       + padLft('time', 10) + padLft('exp', 8) + padLft('uniq', 8)
-       + padLft('mem', 8) + padLft('path', 7));
-  L.push(repStr('-', 79));
+  L.push('OVERALL  (n=' + (overall[algos[0]] ? overall[algos[0]].n : 0) + ' per algo)');
+  L.push(padR('algo', 6)
+       + padLft('ok/n', 9)
+       + padLft('F', 5)
+       + padLft('opt', 5)
+       + padLft('wins', 6)
+       + padLft('score', 7)
+       + padLft('wSch', 6)
+       + padLft('sSch', 7)
+       + padLft('tot', 10)
+       + padLft('step', 10)
+       + padLft('uniq', 8)
+       + padLft('sch', 8)
+       + padLft('mem', 7)
+       + padLft('path', 7));
+  L.push(repStr('-', 6+9+5+5+6+7+6+7+10+10+8+8+7+7));
   for(var i = 0; i < algos.length; i++){
     var a = overall[algos[i]];
+    var fails = a.capped + a.loop + a.stepCap + a.noPath + a.invalid + a.stuck;
     L.push(padR(algos[i], 6)
-         + padLft(a.ok + '/' + a.n, 10)
-         + padLft(a.capped, 8)
+         + padLft(a.ok + '/' + a.n, 9)
+         + padLft(fails, 5)
+         + padLft(a.optimal, 5)
          + padLft(a.wins, 6)
-         + padLft(Math.round(a.score), 8)
+         + padLft(Math.round(a.score), 7)
+         + padLft(a.winsSch, 6)
+         + padLft(Math.round(a.scoreSch), 7)
+         + padLft(fmtTime(a.totalTime / a.n), 10)
          + padLft(fmtTime(a.time / a.n), 10)
-         + padLft(Math.round(a.exp / a.n), 8)
          + padLft(Math.round(a.uniq / a.n), 8)
-         + padLft(fmtBytesShort(a.mem / a.n), 8)
+         + padLft(Math.round(a.searchCells / a.n), 8)
+         + padLft(fmtBytesShort(a.mem / a.n), 7)
          + padLft(a.pathN ? Math.round(a.pathSum / a.pathN) : '-', 7));
   }
 
   L.push('');
-  L.push('BY TYPE — wins (avg unique cells touched)');
-  var hdr = padR('type', 10);
-  for(var j = 0; j < algos.length; j++) hdr += padLft(algos[j], 13);
-  L.push(hdr);
-  L.push(repStr('-', 10 + 13 * algos.length));
-  for(var ti = 0; ti < types.length; ti++){
-    var line = padR(types[ti].name, 10);
-    for(var j2 = 0; j2 < algos.length; j2++){
-      var b = acc[types[ti].key][algos[j2]];
-      line += padLft(b.wins + '(' + Math.round(b.uniq / Math.max(1,b.n)) + ')', 13);
-    }
-    L.push(line);
+  L.push('FAILURE BREAKDOWN (F = capped + loop + stepCap + noPath + invalid + stuck)');
+  L.push(padR('algo', 6)
+       + padLft('capped', 8)
+       + padLft('loop', 7)
+       + padLft('stepCap', 9)
+       + padLft('noPath', 8)
+       + padLft('invalid', 9)
+       + padLft('stuck', 7));
+  L.push(repStr('-', 6+8+7+9+8+9+7));
+  for(var fi = 0; fi < algos.length; fi++){
+    var f = overall[algos[fi]];
+    L.push(padR(algos[fi], 6)
+         + padLft(f.capped, 8)
+         + padLft(f.loop, 7)
+         + padLft(f.stepCap, 9)
+         + padLft(f.noPath, 8)
+         + padLft(f.invalid, 9)
+         + padLft(f.stuck, 7));
   }
 
   L.push('');
-  L.push('BY SIZE — wins (avg unique cells touched)');
-  var hdr2 = padR('size', 10);
-  for(var j3 = 0; j3 < algos.length; j3++) hdr2 += padLft(algos[j3], 13);
-  L.push(hdr2);
-  L.push(repStr('-', 10 + 13 * algos.length));
+  L.push('OPTIMALITY vs BFS (successful runs only)');
+  L.push(padR('algo', 6) + padLft('ok', 6) + padLft('optimal', 9)
+       + padLft('suboptimal', 11) + padLft('max overhead', 14));
+  L.push(repStr('-', 6+6+9+11+14));
+  for(var oi = 0; oi < algos.length; oi++){
+    var o = overall[algos[oi]];
+    L.push(padR(algos[oi], 6)
+         + padLft(o.ok, 6)
+         + padLft(o.optimal, 9)
+         + padLft(o.suboptimal, 11)
+         + padLft(o.optimal + o.suboptimal > 0
+                  ? 'max ' + (o.suboptimal > 0 ? 'see per-run' : '1.00x')
+                  : '-', 14));
+  }
+
+  L.push('');
+  L.push('PERFECT vs GENERAL');
+  L.push(padR('group', 8) + padR('algo', 6)
+       + padLft('ok/n', 10) + padLft('tot', 10)
+       + padLft('uniq', 8) + padLft('sch', 8));
+  L.push(repStr('-', 8+6+10+10+8+8));
+  for(var g = 0; g < 2; g++){
+    var groupName = g === 0 ? 'perfect' : 'general';
+    var isPerfect = g === 0;
+    for(var gi = 0; gi < algos.length; gi++){
+      var agg = { n:0, ok:0, totalTime:0, uniq:0, searchCells:0 };
+      for(var ti2 = 0; ti2 < types.length; ti2++){
+        if(types[ti2].perfect !== isPerfect) continue;
+        var row = acc[types[ti2].key][algos[gi]];
+        if(!row) continue;
+        agg.n += row.n;  agg.ok += row.ok;
+        agg.totalTime += row.totalTime;
+        agg.uniq += row.uniq;  agg.searchCells += row.searchCells;
+      }
+      if(agg.n === 0) continue;
+      L.push(padR(groupName, 8) + padR(algos[gi], 6)
+           + padLft(agg.ok + '/' + agg.n, 10)
+           + padLft(fmtTime(agg.totalTime / agg.n), 10)
+           + padLft(Math.round(agg.uniq / agg.n), 8)
+           + padLft(Math.round(agg.searchCells / agg.n), 8));
+    }
+  }
+
+  function twoAlgoRow(prefix, rowObj, wUniq, wSch){
+    var line = padR(prefix, 10);
+    for(var j = 0; j < algos.length; j++){
+      var b = rowObj[algos[j]];
+      line += padLft(b.wins + '(' + Math.round(b.uniq / Math.max(1, b.n)) + ') / '
+                    + b.winsSch + '(' + Math.round(b.searchCells / Math.max(1, b.n)) + ')', 20);
+    }
+    return line;
+  }
+  function twoAlgoHeader(label){
+    var hdr = padR(label, 10);
+    for(var j = 0; j < algos.length; j++) hdr += padLft(algos[j], 20);
+    return hdr;
+  }
+
+  L.push('');
+  L.push('BY TYPE — wins(avg uniq) / winsSch(avg sch)');
+  L.push(twoAlgoHeader('type'));
+  L.push(repStr('-', 10 + 20 * algos.length));
+  for(var ti3 = 0; ti3 < types.length; ti3++){
+    L.push(twoAlgoRow(types[ti3].name, acc[types[ti3].key]));
+  }
+
+  L.push('');
+  L.push('BY SIZE — wins(avg uniq) / winsSch(avg sch)');
+  L.push(twoAlgoHeader('size'));
+  L.push(repStr('-', 10 + 20 * algos.length));
   for(var si = 0; si < sizes.length; si++){
     var sk2 = sizes[si][0] + 'x' + sizes[si][1];
-    var line2 = padR(sk2, 10);
-    for(var j4 = 0; j4 < algos.length; j4++){
-      var c = sizeAcc[sk2][algos[j4]];
-      line2 += padLft(c.wins + '(' + Math.round(c.uniq / Math.max(1, c.n)) + ')', 13);
-    }
-    L.push(line2);
+    L.push(twoAlgoRow(sk2, sizeAcc[sk2]));
   }
 
   return L.join('\n');
