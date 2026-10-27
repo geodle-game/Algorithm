@@ -119,6 +119,7 @@ var MASS_MIN_TIME_MS = 5;
 var MASS_MAX_REPS = 20;
 var TICK_DELAY = 16;
 var PLAYBACK_SPEED = 1;
+var PLAYBACK_TARGET_MS = 5000;   // 1x speed plays the whole recording in ~5s
 
 var CUT_CHECK_INTERVAL = 500;
 var CUT_MIN_VISITED_DELTA = 100;
@@ -307,6 +308,7 @@ function fmtBytesShort(b){
   if(b < 1024*1024) return (b/1024).toFixed(0) + 'K';
   return (b/1024/1024).toFixed(1) + 'M';
 }
+function fmtWins(w){ return Number.isInteger(w) ? String(w) : w.toFixed(1); }
 
 function MinHeap(){ this.h = []; }
 MinHeap.prototype.push = function(item){
@@ -1784,7 +1786,7 @@ function getStats(algo){
     stats.cutsMade = algo.cutsMade; stats.cutCellsPruned = algo.cutCellsPruned;
     stats.cutKilledBranches = algo.cutKilledBranches; stats.cutChecksRun = algo.cutChecksRun;
     stats.cutGateSkips = algo.cutGateSkips; stats.archived = algo.archived; stats.revived = algo.revived;
-    stats.archiveSize = algo.archive.length; stats.parkedCount = algo.parked.length;
+    stats.archiveSize = algo.parked ? algo.parked.length : 0; stats.parkedCount = algo.parked ? algo.parked.length : 0;
     stats.skippedBlocked = algo.skippedBlocked;
     stats.liveBranches = algo.branches.length + algo.parked.length + algo.archive.length;
   }
@@ -1821,8 +1823,6 @@ function getStats(algo){
     stats.whCapped = algo.capped;
     stats.whStopReason = algo.stopReason;
   }
-  // Fair route-finding metric: for WI, only the reconstruction phase counts;
-  // for everything else, search cells == total unique cells touched.
   if(algo.kind === 'wi'){
     stats.searchCells = algo.reconCells;
   } else {
@@ -1831,7 +1831,7 @@ function getStats(algo){
   return stats;
 }
 
-// =============== recording ===============
+// =============== recording (timestamped frames) ===============
 function recordFrames(algo){
   var frames = [];
   var isLSB = algo.kind === 'lsb';
@@ -1845,6 +1845,7 @@ function recordFrames(algo){
   algo._recording = true;
   algo._deltaVisited = []; algo._deltaFrontier = []; algo._deltaFrontierRemoved = []; algo._deltaDead = [];
   frames.push({
+    tMs: algo.algMs,
     addVisited: keysOf(algo.visited),
     addFrontier: keysOf(algo.frontier),
     remFrontier: [],
@@ -1861,7 +1862,9 @@ function recordFrames(algo){
     var remFrontier = algo._deltaFrontierRemoved; algo._deltaFrontierRemoved = [];
     var addDead = algo._deltaDead; algo._deltaDead = [];
     frames.push({
-      addVisited: addVisited, addFrontier: addFrontier, remFrontier: remFrontier, addDead: addDead,
+      tMs: algo.algMs,
+      addVisited: addVisited, addFrontier: addFrontier,
+      remFrontier: remFrontier, addDead: addDead,
       path: algo.path ? algo.path.slice() : null,
       parked: parkedOf(algo),
       stats: getStats(algo)
@@ -1872,10 +1875,12 @@ function recordFrames(algo){
   return frames;
 }
 
-// =============== playback ===============
-var recording = null, playbackIdx = -1, paused = false, finished = false, lastFrameTime = 0, tickAccumulator = 0;
+// =============== playback (timestamp-synchronous) ===============
+var recording = null, paused = false, finished = false;
+var lastFrameTime = 0, _lastLoopNow = 0;
 var playbackA = { visited:{}, frontier:{}, dead:{} }, playbackL = { visited:{}, frontier:{}, dead:{} };
 var currentA = { path:null, parked:null, stats:null }, currentL = { path:null, parked:null, stats:null };
+var pb = { idxA: -1, idxL: -1, elapsed: 0, finishedA: false, finishedL: false };
 
 function applyFrame(state, frame){
   for(var i=0; i<frame.addVisited.length; i++) state.visited[frame.addVisited[i]] = true;
@@ -1883,21 +1888,30 @@ function applyFrame(state, frame){
   for(var k=0; k<frame.remFrontier.length; k++) delete state.frontier[frame.remFrontier[k]];
   for(var m=0; m<frame.addDead.length; m++) state.dead[frame.addDead[m]] = true;
 }
-function advanceToFrame(target){
-  if(target <= playbackIdx) return;
-  while(playbackIdx < target){
-    playbackIdx++;
-    var fa = recording.framesA[playbackIdx], fl = recording.framesL[playbackIdx];
-    applyFrame(playbackA, fa); applyFrame(playbackL, fl);
-    currentA.path = fa.path; currentA.parked = fa.parked; currentA.stats = fa.stats;
-    currentL.path = fl.path; currentL.parked = fl.parked; currentL.stats = fl.stats;
+function advanceToTime(targetMs){
+  var fa = recording.framesA, fl = recording.framesL;
+  while(pb.idxA + 1 < fa.length && fa[pb.idxA + 1].tMs <= targetMs){
+    pb.idxA++;
+    var f = fa[pb.idxA];
+    applyFrame(playbackA, f);
+    currentA.path = f.path; currentA.parked = f.parked; currentA.stats = f.stats;
   }
+  while(pb.idxL + 1 < fl.length && fl[pb.idxL + 1].tMs <= targetMs){
+    pb.idxL++;
+    var f2 = fl[pb.idxL];
+    applyFrame(playbackL, f2);
+    currentL.path = f2.path; currentL.parked = f2.parked; currentL.stats = f2.stats;
+  }
+  pb.finishedA = (pb.idxA >= fa.length - 1);
+  pb.finishedL = (pb.idxL >= fl.length - 1);
 }
 function resetPlayback(){
-  playbackIdx = -1; tickAccumulator = 0;
-  playbackA = { visited:{}, frontier:{}, dead:{} }; playbackL = { visited:{}, frontier:{}, dead:{} };
-  currentA = { path:null, parked:null, stats:null }; currentL = { path:null, parked:null, stats:null };
-  advanceToFrame(0);
+  pb = { idxA: -1, idxL: -1, elapsed: 0, finishedA: false, finishedL: false };
+  playbackA = { visited:{}, frontier:{}, dead:{} };
+  playbackL = { visited:{}, frontier:{}, dead:{} };
+  currentA = { path:null, parked:null, stats:null };
+  currentL = { path:null, parked:null, stats:null };
+  advanceToTime(0);
 }
 
 // =============== rendering ===============
@@ -1968,7 +1982,7 @@ function fmtStats(stats){
   }
   if(stats.isWI){
     s += 'phase: <b>' + stats.wiPhase + '</b>  pruned: <b>' + stats.wiCellsPruned + '</b><br>';
-    s += 'wall segments checked: <b>' + stats.wiWallSegmentsInspected + '</b> / ' + stats.wiWallCellsTotal + ' wall cells<br>';
+    s += 'wall segments: <b>' + stats.wiWallSegmentsInspected + '</b> / ' + stats.wiWallCellsTotal + ' wall cells<br>';
     s += 'analysis cells: <b>' + stats.wiAnalysisCells + '</b>  neighbour checks: <b>' + stats.wiNeighborChecks + '</b><br>';
     s += 'recon cells (search): <b>' + stats.wiReconCells + '</b><br>';
   }
@@ -1983,7 +1997,7 @@ function fmtStats(stats){
   s += 'done: <b>' + stats.done + '</b>';
   if(stats.exhausted) s += ' <span style="color:#f88">(exhausted)</span>';
   if(stats.done) s += '  success: <b>' + (stats.success ? 'yes' : 'NO') + '</b>';
-  s += '<br>alg time (recorded): <b>' + fmtTime(stats.algMs) + '</b>';
+  s += '<br>alg time: <b>' + fmtTime(stats.algMs) + '</b>';
   return s;
 }
 function renderCurrent(){
@@ -1995,14 +2009,34 @@ function renderCurrent(){
        rTSCS, rTS ? rTS.tilesX : 0, rTS ? rTS.tilesY : 0, rTS ? rTS.TS : 0);
   draw(ctxL, recording.grid, playbackL, currentL.path, currentL.parked, recording.W, recording.H,
        lTSCS, lTS ? lTS.tilesX : 0, lTS ? lTS.tilesY : 0, lTS ? lTS.TS : 0);
-  var showA = finished ? recording.framesA[recording.framesA.length - 1].stats : currentA.stats;
-  var showL = finished ? recording.framesL[recording.framesL.length - 1].stats : currentL.stats;
-  document.getElementById('sA').innerHTML = fmtStats(showA);
-  document.getElementById('sL').innerHTML = fmtStats(showL);
+
+  var statsA = currentA.stats || recording.framesA[0].stats;
+  var statsL = currentL.stats || recording.framesL[0].stats;
+  var badgeA = pb.finishedA
+    ? '<div style="color:#6f6;font-weight:bold;margin-top:4px">&#10004; FINISHED @ ' + fmtTime(recording.finishA) + '</div>'
+    : '';
+  var badgeL = pb.finishedL
+    ? '<div style="color:#6f6;font-weight:bold;margin-top:4px">&#10004; FINISHED @ ' + fmtTime(recording.finishL) + '</div>'
+    : '';
+  document.getElementById('sA').innerHTML = fmtStats(statsA) + badgeA;
+  document.getElementById('sL').innerHTML = fmtStats(statsL) + badgeL;
+
   if(recording){
-    var meta = 'frame ' + (playbackIdx < 0 ? 0 : playbackIdx) + ' / ' + (recording.ticks - 1) +
-               '  |  speed ' + (PLAYBACK_SPEED >= 9999 ? 'Instant' : PLAYBACK_SPEED + 'x') +
-               '  |  wall ' + fmtTime(recording.computeMs || 0);
+    var t = Math.min(pb.elapsed, recording.totalMs);
+    var pct = recording.totalMs > 0 ? (t / recording.totalMs * 100) : 100;
+    var speedTxt = (PLAYBACK_SPEED >= 9999) ? 'Instant' : (PLAYBACK_SPEED + 'x');
+    var rateTxt = '';
+    if(recording.playbackRate > 0 && recording.playbackRate < 1){
+      rateTxt = '  (slowed ' + Math.round(1 / recording.playbackRate) + '\u00D7 vs real time)';
+    } else if(recording.playbackRate > 1){
+      rateTxt = '  (sped ' + Math.round(recording.playbackRate) + '\u00D7 vs real time)';
+    }
+    var meta =
+      't = ' + fmtTime(t) + ' / ' + fmtTime(recording.totalMs) + ' (' + pct.toFixed(0) + '%)' +
+      '  |  ' + LEFT_ALGO + ' ' + Math.max(0, pb.idxA) + '/' + (recording.framesA.length - 1) +
+      '   ' + RIGHT_ALGO + ' ' + Math.max(0, pb.idxL) + '/' + (recording.framesL.length - 1) +
+      '  |  speed ' + speedTxt + rateTxt +
+      '  |  recorded in ' + fmtTime(recording.computeMs || 0);
     document.getElementById('metaA').innerHTML = meta;
     document.getElementById('metaL').innerHTML = meta;
   }
@@ -2065,25 +2099,32 @@ function buildAndPlay(){
     var rAlgo = makeAlgo(RIGHT_ALGO, grid, START, GOAL);
     var framesL = recordFrames(lAlgo);
     var framesR = recordFrames(rAlgo);
-    var ticks = Math.max(framesL.length, framesR.length);
-    var idleL = framesL[framesL.length-1];
-    while(framesL.length < ticks) framesL.push({ addVisited:[], addFrontier:[], remFrontier:[], addDead:[], path: idleL.path, parked: idleL.parked, stats: idleL.stats });
-    var idleR = framesR[framesR.length-1];
-    while(framesR.length < ticks) framesR.push({ addVisited:[], addFrontier:[], remFrontier:[], addDead:[], path: idleR.path, parked: idleR.parked, stats: idleR.stats });
-    recording = { framesA: framesL, framesL: framesR, ticks: ticks, grid: grid, START: START, GOAL: GOAL, W: W, H: H };
-    if(lAlgo.kind === 'tscs'){
-      recording.tscsTileInfoL = { tilesX: lAlgo.tilesX, tilesY: lAlgo.tilesY, TS: lAlgo.TS };
-    }
-    if(rAlgo.kind === 'tscs'){
-      recording.tscsTileInfoR = { tilesX: rAlgo.tilesX, tilesY: rAlgo.tilesY, TS: rAlgo.TS };
-    }
     var computeMs = performance.now() - t0;
-    recording.computeMs = computeMs;
-    banner.textContent = 'Recorded ' + recording.ticks + ' frames in ' + fmtTime(computeMs) +
-                         ' (' + LEFT_ALGO + ': ' + framesL.length + ', ' + RIGHT_ALGO + ': ' + framesR.length + ')';
-    setTimeout(function(){ banner.style.display = 'none'; }, 2500);
+    recording = {
+      framesA: framesL, framesL: framesR,
+      grid: grid, START: START, GOAL: GOAL, W: W, H: H,
+      computeMs: computeMs
+    };
+    if(lAlgo.kind === 'tscs') recording.tscsTileInfoL = { tilesX: lAlgo.tilesX, tilesY: lAlgo.tilesY, TS: lAlgo.TS };
+    if(rAlgo.kind === 'tscs') recording.tscsTileInfoR = { tilesX: rAlgo.tilesX, tilesY: rAlgo.tilesY, TS: rAlgo.TS };
+
+    // --- Timeline ---
+    var finishA = framesL.length > 0 ? framesL[framesL.length - 1].tMs : 0;
+    var finishL = framesR.length > 0 ? framesR[framesR.length - 1].tMs : 0;
+    var totalMs = Math.max(finishA, finishL, 0.001);
+    recording.finishA = finishA;
+    recording.finishL = finishL;
+    recording.totalMs = totalMs;
+    recording.playbackRate = totalMs / PLAYBACK_TARGET_MS;
+
+    banner.textContent = 'Recorded ' + framesL.length + '/' + framesR.length + ' frames in ' + fmtTime(computeMs) +
+                         '  (finish: ' + LEFT_ALGO + ' ' + fmtTime(finishA) + ', ' + RIGHT_ALGO + ' ' + fmtTime(finishL) + ')';
+    setTimeout(function(){ banner.style.display = 'none'; }, 3000);
+
     resetPlayback();
-    paused = false; finished = false; lastFrameTime = 0;
+    paused = false; finished = false;
+    lastFrameTime = 0;
+    _lastLoopNow = performance.now();
     document.getElementById('pauseBtn').innerText = 'Pause';
     renderCurrent();
   }, 20);
@@ -2091,28 +2132,44 @@ function buildAndPlay(){
 function togglePause(){
   if(finished) return;
   paused = !paused;
+  if(paused) renderCurrent();
   document.getElementById('pauseBtn').innerText = paused ? 'Resume' : 'Pause';
 }
 function loop(now){
   requestAnimationFrame(loop);
-  if(paused || finished || !recording) return;
+  if(!recording){ _lastLoopNow = now; return; }
+  if(paused || finished){ _lastLoopNow = now; return; }
   if(now - lastFrameTime < TICK_DELAY) return;
+
+  var deltaWall = now - _lastLoopNow;
+  if(deltaWall > 100) deltaWall = 100;
+  _lastLoopNow = now;
   lastFrameTime = now;
-  var lastIdx = recording.ticks - 1;
-  if(PLAYBACK_SPEED >= 9999){ advanceToFrame(lastIdx); finished = true; renderCurrent(); document.getElementById('pauseBtn').innerText = 'Done'; return; }
-  tickAccumulator += PLAYBACK_SPEED;
-  var advanceBy = Math.floor(tickAccumulator);
-  if(advanceBy <= 0){ renderCurrent(); return; }
-  tickAccumulator -= advanceBy;
-  var target = playbackIdx + advanceBy;
-  if(target >= lastIdx){ advanceToFrame(lastIdx); finished = true; renderCurrent(); document.getElementById('pauseBtn').innerText = 'Done'; return; }
-  advanceToFrame(target);
+
+  if(PLAYBACK_SPEED >= 9999){
+    advanceToTime(recording.totalMs + 1);
+    pb.elapsed = recording.totalMs;
+    finished = true;
+    renderCurrent();
+    document.getElementById('pauseBtn').innerText = 'Done';
+    return;
+  }
+
+  var deltaAlgo = deltaWall * PLAYBACK_SPEED * recording.playbackRate;
+  pb.elapsed = Math.min(pb.elapsed + deltaAlgo, recording.totalMs);
+  advanceToTime(pb.elapsed);
+
+  if(pb.elapsed >= recording.totalMs){
+    finished = true;
+    advanceToTime(recording.totalMs + 1);
+    renderCurrent();
+    document.getElementById('pauseBtn').innerText = 'Done';
+    return;
+  }
   renderCurrent();
 }
 
 // =============== BFS shortest path (trusted baseline) ===============
-// BFS shortest path length in cells (start and goal included).
-// Returns null if no path exists; returns 1 if start == goal.
 function bfsShortestPath(g, start, goal){
   var W = g[0].length, H = g.length;
   var sk = start[1]*W + start[0], gk = goal[1]*W + goal[0];
@@ -2141,9 +2198,7 @@ function bfsShortestPath(g, start, goal){
   return null;
 }
 
-// =============== mass test (2 algorithms, mixed types) ===============
-var lastSeeds = null, lastN = 0;
-
+// =============== benchmark runners (fair timing) ===============
 function runOneOnce(factory){
   var t0 = performance.now();
   var algo = factory();
@@ -2157,7 +2212,6 @@ function runOneOnce(factory){
   stats.totalMs = totalMs;
   return { stats: stats, algMs: algo.algMs, totalMs: totalMs, ctorMs: ctorMs };
 }
-
 function runBench(factory){
   var totalMs = 0, totalCtorMs = 0, totalAlgMs = 0, reps = 0, last = null;
   while(reps < MASS_MAX_REPS){
@@ -2176,7 +2230,6 @@ function runBench(factory){
     reps: reps
   };
 }
-
 function runOneCapped(factory, capMs){
   var t0 = performance.now();
   var algo = factory();
@@ -2196,7 +2249,6 @@ function runOneCapped(factory, capMs){
   stats.totalMs = totalMs;
   return { stats: stats, algMs: algo.algMs, totalMs: totalMs, ctorMs: ctorMs };
 }
-
 function runBenchCapped(factory, minMs, capMs){
   var totalMs = 0, totalCtorMs = 0, totalAlgMs = 0, reps = 0, last = null;
   var anyCapped = false;
@@ -2218,6 +2270,9 @@ function runBenchCapped(factory, minMs, capMs){
     reps: reps
   };
 }
+
+// =============== mass test (2 algorithms, mixed types) ===============
+var lastSeeds = null, lastN = 0;
 
 function massTest(reuse, N){
   N = N || 12;
@@ -2256,11 +2311,20 @@ function massTest(reuse, N){
       if(!aOk && !lOk) verdict = 'both FAIL';
       else if(!lOk) verdict = LKind + ' (' + RKind + ' fail)';
       else if(!aOk) verdict = RKind + ' (' + LKind + ' fail)';
-      else if(ra.stats.uniqueVisited < rl.stats.uniqueVisited){ verdict = LKind; aWins++; }
-      else if(rl.stats.uniqueVisited < ra.stats.uniqueVisited){ verdict = RKind; lWins++; }
-      else { verdict = 'tie'; ties++; }
+      else {
+        var aT = ra.avgTotalMs > 0 ? ra.avgTotalMs : 1e-6;
+        var lT = rl.avgTotalMs > 0 ? rl.avgTotalMs : 1e-6;
+        var aM = ra.stats.memBytes > 0 ? ra.stats.memBytes : 1;
+        var lM = rl.stats.memBytes > 0 ? rl.stats.memBytes : 1;
+        var bestT = Math.min(aT, lT), bestM = Math.min(aM, lM);
+        var aC = 0.5 * (bestT / aT) + 0.5 * (bestM / aM);
+        var lC = 0.5 * (bestT / lT) + 0.5 * (bestM / lM);
+        if(Math.abs(aC - lC) < 1e-6){ verdict = 'tie'; ties++; }
+        else if(aC > lC){ verdict = LKind; aWins++; }
+        else { verdict = RKind; lWins++; }
+      }
       if(aOk && lOk){
-        acc.aTime += ra.avgMs; acc.lTime += rl.avgMs;
+        acc.aTime += ra.avgTotalMs; acc.lTime += rl.avgTotalMs;
         acc.aExp += ra.stats.expanded; acc.lExp += rl.stats.expanded;
         acc.aUniq += ra.stats.uniqueVisited; acc.lUniq += rl.stats.uniqueVisited;
         acc.aPath += ra.stats.pathLen || 0; acc.lPath += rl.stats.pathLen || 0;
@@ -2268,7 +2332,7 @@ function massTest(reuse, N){
         acc.n++;
       }
       rows.push({ type: plan.type, seed: plan.seed,
-        aTime: ra.avgMs, lTime: rl.avgMs, aReps: ra.reps, lReps: rl.reps,
+        aTime: ra.avgTotalMs, lTime: rl.avgTotalMs, aReps: ra.reps, lReps: rl.reps,
         aExp: ra.stats.expanded, lExp: rl.stats.expanded,
         aUniq: ra.stats.uniqueVisited, lUniq: rl.stats.uniqueVisited,
         aPath: ra.stats.pathLen, lPath: rl.stats.pathLen,
@@ -2280,8 +2344,8 @@ function massTest(reuse, N){
     var txt = '';
     txt += 'MASS TEST - ' + N + ' mazes (' + W + 'x' + H + ')' + (reuse && lastN === N ? '  [reused]' : '  [fresh]') + '\n';
     txt += 'Left: ' + LKind + '   Right: ' + RKind + '\n';
-    txt += 'Verdict by UNIQUE CELLS TOUCHED.\n';
-    txt += 'Memory is a rough estimate.\n\n';
+    txt += 'Verdict by COMBINED score = 0.5*minTime/time + 0.5*minMem/mem (higher is better).\n';
+    txt += 'Times include constructor. Memory is a coarse estimate.\n\n';
     txt += pad('type', 9) + padL('seed', 12)
          + padL('Lt', 9) + padL('Rt', 9)
          + padL('Lexp', 6) + padL('Rexp', 6)
@@ -2324,7 +2388,7 @@ function massTest(reuse, N){
 // =============== mass test: ALL algorithms on perfect + general mazes ===============
 var ALL_ALGO_KINDS = ['A*', 'LSB', 'DFS', 'SCS', 'TSCS', 'WI', 'WH-L', 'WH-R'];
 
-var ALL_TEST_SEED_BASE = 0xC0FFEE;   // fixed for reproducibility
+var ALL_TEST_SEED_BASE = 0xC0FFEE;
 
 var ALL_TEST_TYPES = [
   { key:'maze_dfs',     name:'MazeDFS',  perfect:true  },
@@ -2369,7 +2433,7 @@ function startGoalAtSize(key, w, h){
 function newStatRow(){
   return {
     n:0, ok:0, capped:0, loop:0, stepCap:0, noPath:0, invalid:0, stuck:0,
-    wins:0, score:0, winsSch:0, scoreSch:0,
+    wins:0, rankPts:0, score:0,          // scoring: time+memory combined
     optimal:0, suboptimal:0,
     time:0, totalTime:0, ctorTime:0,
     exp:0, uniq:0, searchCells:0, mem:0, pathSum:0, pathN:0
@@ -2434,7 +2498,6 @@ function massTestAll(perType){
   for(var ti = 0; ti < types.length; ti++){
     for(var k = 0; k < perType; k++){
       var sz = sizes[k % sizes.length];
-      // Deterministic per-(type, index) seed — reproducible across runs.
       var seed = (ALL_TEST_SEED_BASE
                  ^ ((ti + 1) * 0x9E3779B1 >>> 0)
                  ^ ((k  + 1) * 0x85EBCA6B >>> 0)) >>> 0;
@@ -2470,40 +2533,53 @@ function massTestAll(perType){
       updateRow(S[x.kind],       x, bfsLen);
     }
 
-    // --- Score A: by uniqueVisited (unchanged, spec-compliant) ---
+    // --- Scoring: combined time + memory ---
     var okList = [];
     for(var i3 = 0; i3 < res.length; i3++) if(res[i3].stats.success) okList.push(res[i3]);
-    okList.sort(function(p, q){ return p.stats.uniqueVisited - q.stats.uniqueVisited; });
-    var nOk = okList.length;
-    for(var i4 = 0; i4 < nOk; i4++){
-      var rank = i4;
-      while(rank > 0 && okList[rank - 1].stats.uniqueVisited === okList[i4].stats.uniqueVisited) rank--;
-      var pts = nOk - 1 - rank;
-      A[okList[i4].kind].score += pts;
-      overall[okList[i4].kind].score += pts;
-      S[okList[i4].kind].score += pts;
-      if(rank === 0){
-        A[okList[i4].kind].wins++;
-        overall[okList[i4].kind].wins++;
-        S[okList[i4].kind].wins++;
-      }
+    if(okList.length === 0) return;
+
+    var bestTime = Infinity, bestMem = Infinity;
+    for(var bi = 0; bi < okList.length; bi++){
+      var tt = okList[bi].avgTotalMs;
+      var mm = okList[bi].stats.memBytes;
+      if(tt > 0 && tt < bestTime) bestTime = tt;
+      if(mm > 0 && mm < bestMem)  bestMem  = mm;
+    }
+    if(!isFinite(bestTime) || bestTime <= 0) bestTime = 1e-6;
+    if(!isFinite(bestMem)  || bestMem  <= 0) bestMem  = 1;
+
+    var scored = [];
+    for(var si2 = 0; si2 < okList.length; si2++){
+      var r = okList[si2];
+      var t2 = r.avgTotalMs > 0 ? r.avgTotalMs : bestTime;
+      var m2 = r.stats.memBytes > 0 ? r.stats.memBytes : bestMem;
+      var relT = bestTime / t2;
+      var relM = bestMem / m2;
+      var c = 0.5 * relT + 0.5 * relM;
+      scored.push({ r: r, c: c });
+      A[r.kind].score += c;
+      overall[r.kind].score += c;
+      S[r.kind].score += c;
     }
 
-    // --- Score B: by searchCells (parallel, fair route-finding metric) ---
-    var okListSch = okList.slice().sort(function(p, q){ return p.stats.searchCells - q.stats.searchCells; });
-    var nOkSch = okListSch.length;
-    for(var i5 = 0; i5 < nOkSch; i5++){
-      var rankSch = i5;
-      while(rankSch > 0 && okListSch[rankSch - 1].stats.searchCells === okListSch[i5].stats.searchCells) rankSch--;
-      var ptsSch = nOkSch - 1 - rankSch;
-      A[okListSch[i5].kind].scoreSch += ptsSch;
-      overall[okListSch[i5].kind].scoreSch += ptsSch;
-      S[okListSch[i5].kind].scoreSch += ptsSch;
-      if(rankSch === 0){
-        A[okListSch[i5].kind].winsSch++;
-        overall[okListSch[i5].kind].winsSch++;
-        S[okListSch[i5].kind].winsSch++;
+    scored.sort(function(p, q){ return q.c - p.c; });
+    var maxC = scored[0].c;
+    var topCount = 0;
+    for(var tc = 0; tc < scored.length; tc++) if(Math.abs(scored[tc].c - maxC) < 1e-9) topCount++;
+    var prevC = null, rank = -1;
+    for(var ri = 0; ri < scored.length; ri++){
+      var xs = scored[ri];
+      if(prevC === null || Math.abs(xs.c - prevC) >= 1e-9) rank = ri;
+      var pts = scored.length - 1 - rank;
+      A[xs.r.kind].rankPts += pts;
+      overall[xs.r.kind].rankPts += pts;
+      S[xs.r.kind].rankPts += pts;
+      if(rank === 0){
+        A[xs.r.kind].wins += 1 / topCount;
+        overall[xs.r.kind].wins += 1 / topCount;
+        S[xs.r.kind].wins += 1 / topCount;
       }
+      prevC = xs.c;
     }
   }
 
@@ -2537,10 +2613,15 @@ function formatMassAll(types, algos, sizes, acc, overall, sizeAcc, perType, tota
   L.push('  sizes: ' + sizes.map(function(s){ return s[0] + 'x' + s[1]; }).join(', ') +
          '   cap: ' + ALL_TEST_CAP_MS + 'ms/algo-run');
   L.push('  wall: ' + fmtTime(elapsed));
-  L.push('  tot = constructor + steps (fair); step = steps only; sch = search-only cells');
-  L.push('  score/wins  -> by uniqueVisited (unchanged primary rule)');
-  L.push('  sSch/wSch   -> by searchCells (fair route-finding comparison)');
-  L.push('  mem is a coarse estimate, not a measured peak');
+  L.push('');
+  L.push('SCORING (per maze, per successful algo):');
+  L.push('  relTime = minTime / thisTime     (1.0 = fastest)');
+  L.push('  relMem  = minMem  / thisMem      (1.0 = leanest)');
+  L.push('  combined = 0.5*relTime + 0.5*relMem, in (0,1]');
+  L.push('  Wins    = share of top combined (ties split)');
+  L.push('  score   = sum(combined) / n     (failures contribute 0)');
+  L.push('  rkPts   = sum of rank pts / n   (N-1 for 1st, N-2 for 2nd, ...)');
+  L.push('  Time includes constructor. Memory is a coarse estimate.');
   L.push('');
 
   L.push('OVERALL  (n=' + (overall[algos[0]] ? overall[algos[0]].n : 0) + ' per algo)');
@@ -2548,38 +2629,36 @@ function formatMassAll(types, algos, sizes, acc, overall, sizeAcc, perType, tota
        + padLft('ok/n', 9)
        + padLft('F', 5)
        + padLft('opt', 5)
-       + padLft('wins', 6)
+       + padLft('wins', 7)
        + padLft('score', 7)
-       + padLft('wSch', 6)
-       + padLft('sSch', 7)
+       + padLft('rkPts', 8)
        + padLft('tot', 10)
-       + padLft('step', 10)
+       + padLft('mem', 7)
        + padLft('uniq', 8)
        + padLft('sch', 8)
-       + padLft('mem', 7)
        + padLft('path', 7));
-  L.push(repStr('-', 6+9+5+5+6+7+6+7+10+10+8+8+7+7));
+  L.push(repStr('-', 6+9+5+5+7+7+8+10+7+8+8+7));
   for(var i = 0; i < algos.length; i++){
     var a = overall[algos[i]];
     var fails = a.capped + a.loop + a.stepCap + a.noPath + a.invalid + a.stuck;
+    var avgScore = a.n > 0 ? a.score / a.n : 0;
+    var avgRk    = a.n > 0 ? a.rankPts / a.n : 0;
     L.push(padR(algos[i], 6)
          + padLft(a.ok + '/' + a.n, 9)
          + padLft(fails, 5)
          + padLft(a.optimal, 5)
-         + padLft(a.wins, 6)
-         + padLft(Math.round(a.score), 7)
-         + padLft(a.winsSch, 6)
-         + padLft(Math.round(a.scoreSch), 7)
+         + padLft(fmtWins(a.wins), 7)
+         + padLft(avgScore.toFixed(2), 7)
+         + padLft(avgRk.toFixed(1), 8)
          + padLft(fmtTime(a.totalTime / a.n), 10)
-         + padLft(fmtTime(a.time / a.n), 10)
+         + padLft(fmtBytesShort(a.mem / a.n), 7)
          + padLft(Math.round(a.uniq / a.n), 8)
          + padLft(Math.round(a.searchCells / a.n), 8)
-         + padLft(fmtBytesShort(a.mem / a.n), 7)
          + padLft(a.pathN ? Math.round(a.pathSum / a.pathN) : '-', 7));
   }
 
   L.push('');
-  L.push('FAILURE BREAKDOWN (F = capped + loop + stepCap + noPath + invalid + stuck)');
+  L.push('FAILURE BREAKDOWN');
   L.push(padR('algo', 6)
        + padLft('capped', 8)
        + padLft('loop', 7)
@@ -2601,78 +2680,75 @@ function formatMassAll(types, algos, sizes, acc, overall, sizeAcc, perType, tota
 
   L.push('');
   L.push('OPTIMALITY vs BFS (successful runs only)');
-  L.push(padR('algo', 6) + padLft('ok', 6) + padLft('optimal', 9)
-       + padLft('suboptimal', 11) + padLft('max overhead', 14));
-  L.push(repStr('-', 6+6+9+11+14));
+  L.push(padR('algo', 6) + padLft('ok', 6) + padLft('optimal', 9) + padLft('suboptimal', 11));
+  L.push(repStr('-', 6+6+9+11));
   for(var oi = 0; oi < algos.length; oi++){
     var o = overall[algos[oi]];
     L.push(padR(algos[oi], 6)
          + padLft(o.ok, 6)
          + padLft(o.optimal, 9)
-         + padLft(o.suboptimal, 11)
-         + padLft(o.optimal + o.suboptimal > 0
-                  ? 'max ' + (o.suboptimal > 0 ? 'see per-run' : '1.00x')
-                  : '-', 14));
+         + padLft(o.suboptimal, 11));
   }
 
   L.push('');
   L.push('PERFECT vs GENERAL');
   L.push(padR('group', 8) + padR('algo', 6)
        + padLft('ok/n', 10) + padLft('tot', 10)
-       + padLft('uniq', 8) + padLft('sch', 8));
-  L.push(repStr('-', 8+6+10+10+8+8));
+       + padLft('score', 7) + padLft('uniq', 8));
+  L.push(repStr('-', 8+6+10+10+7+8));
   for(var g = 0; g < 2; g++){
     var groupName = g === 0 ? 'perfect' : 'general';
     var isPerfect = g === 0;
     for(var gi = 0; gi < algos.length; gi++){
-      var agg = { n:0, ok:0, totalTime:0, uniq:0, searchCells:0 };
+      var agg = { n:0, ok:0, totalTime:0, score:0, uniq:0 };
       for(var ti2 = 0; ti2 < types.length; ti2++){
         if(types[ti2].perfect !== isPerfect) continue;
         var row = acc[types[ti2].key][algos[gi]];
         if(!row) continue;
         agg.n += row.n;  agg.ok += row.ok;
         agg.totalTime += row.totalTime;
-        agg.uniq += row.uniq;  agg.searchCells += row.searchCells;
+        agg.score += row.score;
+        agg.uniq += row.uniq;
       }
       if(agg.n === 0) continue;
       L.push(padR(groupName, 8) + padR(algos[gi], 6)
            + padLft(agg.ok + '/' + agg.n, 10)
            + padLft(fmtTime(agg.totalTime / agg.n), 10)
-           + padLft(Math.round(agg.uniq / agg.n), 8)
-           + padLft(Math.round(agg.searchCells / agg.n), 8));
+           + padLft((agg.score / agg.n).toFixed(2), 7)
+           + padLft(Math.round(agg.uniq / agg.n), 8));
     }
   }
 
-  function twoAlgoRow(prefix, rowObj, wUniq, wSch){
+  function scoreRow(prefix, rowObj){
     var line = padR(prefix, 10);
     for(var j = 0; j < algos.length; j++){
       var b = rowObj[algos[j]];
-      line += padLft(b.wins + '(' + Math.round(b.uniq / Math.max(1, b.n)) + ') / '
-                    + b.winsSch + '(' + Math.round(b.searchCells / Math.max(1, b.n)) + ')', 20);
+      var avgS = b.n > 0 ? (b.score / b.n) : 0;
+      line += padLft(fmtWins(b.wins) + '(' + avgS.toFixed(2) + ')', 13);
     }
     return line;
   }
-  function twoAlgoHeader(label){
+  function scoreHeader(label){
     var hdr = padR(label, 10);
-    for(var j = 0; j < algos.length; j++) hdr += padLft(algos[j], 20);
+    for(var j = 0; j < algos.length; j++) hdr += padLft(algos[j], 13);
     return hdr;
   }
 
   L.push('');
-  L.push('BY TYPE — wins(avg uniq) / winsSch(avg sch)');
-  L.push(twoAlgoHeader('type'));
-  L.push(repStr('-', 10 + 20 * algos.length));
+  L.push('BY TYPE — wins(avg combined score)');
+  L.push(scoreHeader('type'));
+  L.push(repStr('-', 10 + 13 * algos.length));
   for(var ti3 = 0; ti3 < types.length; ti3++){
-    L.push(twoAlgoRow(types[ti3].name, acc[types[ti3].key]));
+    L.push(scoreRow(types[ti3].name, acc[types[ti3].key]));
   }
 
   L.push('');
-  L.push('BY SIZE — wins(avg uniq) / winsSch(avg sch)');
-  L.push(twoAlgoHeader('size'));
-  L.push(repStr('-', 10 + 20 * algos.length));
+  L.push('BY SIZE — wins(avg combined score)');
+  L.push(scoreHeader('size'));
+  L.push(repStr('-', 10 + 13 * algos.length));
   for(var si = 0; si < sizes.length; si++){
     var sk2 = sizes[si][0] + 'x' + sizes[si][1];
-    L.push(twoAlgoRow(sk2, sizeAcc[sk2]));
+    L.push(scoreRow(sk2, sizeAcc[sk2]));
   }
 
   return L.join('\n');
