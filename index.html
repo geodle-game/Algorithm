@@ -57,12 +57,6 @@
 </div>
 
 <div class="panel" style="margin-bottom:8px;">
-  <span style="color:#888;font-size:12px;margin-right:6px;">Playback:</span>
-  <button class="mode-btn" data-mode="full" onclick="setPlaybackMode('full')">Show all</button>
-  <button class="mode-btn" data-mode="race" onclick="setPlaybackMode('race')">Race (shared time)</button>
-</div>
-
-<div class="panel" style="margin-bottom:8px;">
   <span style="color:#888;font-size:12px;margin-right:6px;">Left:</span>
   <select id="leftSel" onchange="changeAlgo('left', this.value)">
     <option selected>A*</option><option>LSB</option><option>DFS</option><option>SCS</option><option>TSCS</option>
@@ -126,7 +120,8 @@ var MASS_MAX_REPS = 20;
 var TICK_DELAY = 16;
 var PLAYBACK_SPEED = 1;
 var PLAYBACK_TARGET_MS = 5000;
-var PLAYBACK_MODE = 'full';    // 'full' (per-algo normalized) or 'race' (shared timeline)
+var TARGET_PLAYBACK_FRAMES = 300;
+var FADE_TICKS = 3;
 
 var CUT_CHECK_INTERVAL = 500;
 var CUT_MIN_VISITED_DELTA = 100;
@@ -1839,7 +1834,7 @@ function getStats(algo){
   return stats;
 }
 
-// =============== recording (timestamped frames) ===============
+// =============== recording ===============
 function recordFrames(algo){
   var frames = [];
   var isLSB = algo.kind === 'lsb';
@@ -1883,12 +1878,40 @@ function recordFrames(algo){
   return frames;
 }
 
+function downsampleFrames(frames, target){
+  if(frames.length <= target) return frames;
+  var out = [];
+  var step = frames.length / target;
+  var i = 0;
+  while(i < frames.length){
+    var end = Math.min(Math.round((out.length + 1) * step), frames.length);
+    if(end <= i) end = i + 1;
+    var lastF = frames[end - 1];
+    var merged = {
+      tMs: lastF.tMs,
+      addVisited: [], addFrontier: [], remFrontier: [], addDead: [],
+      path: lastF.path, parked: lastF.parked, stats: lastF.stats
+    };
+    for(var j = i; j < end; j++){
+      var f = frames[j];
+      for(var m = 0; m < f.addVisited.length; m++) merged.addVisited.push(f.addVisited[m]);
+      for(var m = 0; m < f.addFrontier.length; m++) merged.addFrontier.push(f.addFrontier[m]);
+      for(var m = 0; m < f.remFrontier.length; m++) merged.remFrontier.push(f.remFrontier[m]);
+      for(var m = 0; m < f.addDead.length; m++) merged.addDead.push(f.addDead[m]);
+    }
+    out.push(merged);
+    i = end;
+  }
+  return out;
+}
+
 // =============== playback state ===============
 var recording = null, paused = false, finished = false;
 var lastFrameTime = 0, _lastLoopNow = 0;
 var playbackA = { visited:{}, frontier:{}, dead:{} }, playbackL = { visited:{}, frontier:{}, dead:{} };
 var currentA = { path:null, parked:null, stats:null }, currentL = { path:null, parked:null, stats:null };
 var pb = { idxA: -1, idxL: -1, elapsedWall: 0, finishedA: false, finishedL: false };
+var fadeBuf = { A: [], L: [] };
 
 function applyFrame(state, frame){
   for(var i=0; i<frame.addVisited.length; i++) state.visited[frame.addVisited[i]] = true;
@@ -1896,22 +1919,38 @@ function applyFrame(state, frame){
   for(var k=0; k<frame.remFrontier.length; k++) delete state.frontier[frame.remFrontier[k]];
   for(var m=0; m<frame.addDead.length; m++) state.dead[frame.addDead[m]] = true;
 }
-function advanceToTime(targetA, targetL){
+function ageFadeBuffer(side){
+  var buf = fadeBuf[side];
+  for(var i = buf.length - 1; i >= 0; i--){
+    buf[i].age++;
+    if(buf[i].age >= FADE_TICKS) buf.splice(i, 1);
+  }
+}
+function advanceToIndex(targetA, targetL){
   var fa = recording.framesA, fl = recording.framesL;
-  while(pb.idxA + 1 < fa.length && fa[pb.idxA + 1].tMs <= targetA){
+  var advanced = false;
+  while(pb.idxA < targetA && pb.idxA + 1 < fa.length){
     pb.idxA++;
     var f = fa[pb.idxA];
     applyFrame(playbackA, f);
+    if(f.addVisited.length > 0) fadeBuf.A.push({ cells: f.addVisited, age: 0 });
     currentA.path = f.path; currentA.parked = f.parked; currentA.stats = f.stats;
+    advanced = true;
   }
-  while(pb.idxL + 1 < fl.length && fl[pb.idxL + 1].tMs <= targetL){
+  while(pb.idxL < targetL && pb.idxL + 1 < fl.length){
     pb.idxL++;
     var f2 = fl[pb.idxL];
     applyFrame(playbackL, f2);
+    if(f2.addVisited.length > 0) fadeBuf.L.push({ cells: f2.addVisited, age: 0 });
     currentL.path = f2.path; currentL.parked = f2.parked; currentL.stats = f2.stats;
+    advanced = true;
   }
   pb.finishedA = (pb.idxA >= fa.length - 1);
   pb.finishedL = (pb.idxL >= fl.length - 1);
+  if(advanced){
+    ageFadeBuffer('A');
+    ageFadeBuffer('L');
+  }
 }
 function resetPlayback(){
   pb = { idxA: -1, idxL: -1, elapsedWall: 0, finishedA: false, finishedL: false };
@@ -1919,7 +1958,8 @@ function resetPlayback(){
   playbackL = { visited:{}, frontier:{}, dead:{} };
   currentA = { path:null, parked:null, stats:null };
   currentL = { path:null, parked:null, stats:null };
-  advanceToTime(0, 0);
+  fadeBuf = { A: [], L: [] };
+  advanceToIndex(0, 0);
 }
 
 // =============== rendering ===============
@@ -1963,6 +2003,22 @@ function draw(ctx, g, view, path, parked, W, H, showTiles, tilesX, tilesY, TS){
     }
   }
 }
+function drawFadeOverlay(ctx, side){
+  var buf = fadeBuf[side];
+  if(!buf || buf.length === 0 || !recording) return;
+  var W = recording.W;
+  for(var i = 0; i < buf.length; i++){
+    var entry = buf[i];
+    var alpha = 1 - entry.age / FADE_TICKS;
+    if(alpha <= 0) continue;
+    ctx.fillStyle = 'rgba(160,220,255,' + alpha.toFixed(2) + ')';
+    for(var j = 0; j < entry.cells.length; j++){
+      var k = entry.cells[j];
+      var x = k % W, y = Math.floor(k / W);
+      ctx.fillRect(x*CELL, y*CELL, CELL, CELL);
+    }
+  }
+}
 function fmtStats(stats){
   if(!stats) return '';
   var s = 'expanded: <b>' + stats.expanded + '</b><br>';
@@ -1971,7 +2027,7 @@ function fmtStats(stats){
   if(stats.done) s += stats.pathValid ? ' <span style="color:#6f6">valid</span>' : ' <span style="color:#f88">invalid</span>';
   s += '<br>frontier: <b>' + stats.frontier + '</b><br>';
   s += '<span class="mem">memory ~ <b>' + fmtBytes(stats.memBytes) + '</b></span>';
-  if(stats.liveBranches !== null) s += ' <span class="mem">(' + stats.liveBranches + ' live)</span>';
+  if(stats.liveBranches != null) s += ' <span class="mem">(' + stats.liveBranches + ' live)</span>';
   s += '<br>';
   if(stats.isLSB){
     s += 'bt: <b>' + stats.backtracks + '</b>  parks: <b>' + stats.parks + '</b>  res: <b>' + stats.resumes + '</b><br>';
@@ -2018,6 +2074,8 @@ function renderCurrent(){
        rTSCS, rTS ? rTS.tilesX : 0, rTS ? rTS.tilesY : 0, rTS ? rTS.TS : 0);
   draw(ctxL, recording.grid, playbackL, currentL.path, currentL.parked, recording.W, recording.H,
        lTSCS, lTS ? lTS.tilesX : 0, lTS ? lTS.tilesY : 0, lTS ? lTS.TS : 0);
+  drawFadeOverlay(ctxA, 'A');
+  drawFadeOverlay(ctxL, 'L');
 
   var statsA = currentA.stats || recording.framesA[0].stats;
   var statsL = currentL.stats || recording.framesL[0].stats;
@@ -2047,9 +2105,8 @@ function renderCurrent(){
     }
   }
 
-  var modeTxt = (PLAYBACK_MODE === 'full') ? '[show all]' : '[race]';
   var meta =
-    modeTxt + '  playback ' + progPct + '%' +
+    'playback ' + progPct + '%' +
     '  |  ' + LEFT_ALGO + ' ' + Math.max(0, pb.idxA) + '/' + (recording.framesA.length - 1) +
     '   ' + RIGHT_ALGO + ' ' + Math.max(0, pb.idxL) + '/' + (recording.framesL.length - 1) +
     '  |  speed ' + speedTxt + ratioTxt;
@@ -2063,16 +2120,6 @@ function setSpeed(s){
     var v = parseFloat(btns[i].getAttribute('data-sp'));
     btns[i].className = (Math.abs(v - s) < 1e-6) ? 'speed-btn speed-on' : 'speed-btn';
   }
-}
-function setPlaybackMode(mode){
-  PLAYBACK_MODE = mode;
-  var btns = document.querySelectorAll('.mode-btn');
-  for(var i=0; i<btns.length; i++){
-    var v = btns[i].getAttribute('data-mode');
-    btns[i].className = (v === mode) ? 'mode-btn speed-on' : 'mode-btn';
-  }
-  if(recording) resetPlayback();
-  renderCurrent();
 }
 function setSize(w, h){
   W = w; H = h;
@@ -2124,6 +2171,8 @@ function buildAndPlay(){
     var rAlgo = makeAlgo(RIGHT_ALGO, grid, START, GOAL);
     var framesL = recordFrames(lAlgo);
     var framesR = recordFrames(rAlgo);
+    framesL = downsampleFrames(framesL, TARGET_PLAYBACK_FRAMES);
+    framesR = downsampleFrames(framesR, TARGET_PLAYBACK_FRAMES);
     var computeMs = performance.now() - t0;
     recording = {
       framesA: framesL, framesL: framesR,
@@ -2169,7 +2218,7 @@ function loop(now){
   lastFrameTime = now;
 
   if(PLAYBACK_SPEED >= 9999){
-    advanceToTime(recording.finishA + 1, recording.finishL + 1);
+    advanceToIndex(recording.framesA.length - 1, recording.framesL.length - 1);
     pb.elapsedWall = PLAYBACK_TARGET_MS;
     finished = true;
     renderCurrent();
@@ -2180,28 +2229,21 @@ function loop(now){
   pb.elapsedWall += deltaWall * PLAYBACK_SPEED;
 
   if(pb.elapsedWall >= PLAYBACK_TARGET_MS){
-    advanceToTime(recording.finishA + 1, recording.finishL + 1);
+    advanceToIndex(recording.framesA.length - 1, recording.framesL.length - 1);
     finished = true;
     renderCurrent();
     document.getElementById('pauseBtn').innerText = 'Done';
     return;
   }
 
-  var prog = pb.elapsedWall / PLAYBACK_TARGET_MS;
-  var tA, tL;
-  if(PLAYBACK_MODE === 'full'){
-    tA = recording.finishA * prog;
-    tL = recording.finishL * prog;
-  } else {
-    var span = recording.totalMs;
-    tA = Math.min(prog * span, recording.finishA);
-    tL = Math.min(prog * span, recording.finishL);
-  }
-  advanceToTime(tA, tL);
+  var progress = pb.elapsedWall / PLAYBACK_TARGET_MS;
+  var targetA = Math.min(Math.floor(progress * recording.framesA.length), recording.framesA.length - 1);
+  var targetL = Math.min(Math.floor(progress * recording.framesL.length), recording.framesL.length - 1);
+  advanceToIndex(targetA, targetL);
   renderCurrent();
 }
 
-// =============== BFS shortest path (trusted baseline) ===============
+// =============== BFS shortest path ===============
 function bfsShortestPath(g, start, goal){
   var W = g[0].length, H = g.length;
   var sk = start[1]*W + start[0], gk = goal[1]*W + goal[0];
@@ -2791,7 +2833,6 @@ document.getElementById('leftSel').value = LEFT_ALGO;
 document.getElementById('rightSel').value = RIGHT_ALGO;
 
 setSpeed(1);
-setPlaybackMode('full');
 setSize(100, 50);
 requestAnimationFrame(loop);
 </script>
