@@ -121,7 +121,7 @@ var TICK_DELAY = 16;
 var PLAYBACK_SPEED = 1;
 var PLAYBACK_TARGET_MS = 5000;
 var TARGET_PLAYBACK_FRAMES = 300;
-var FADE_TICKS = 3;
+var FADE_TICKS = 8;
 
 var CUT_CHECK_INTERVAL = 500;
 var CUT_MIN_VISITED_DELTA = 100;
@@ -1834,8 +1834,8 @@ function getStats(algo){
   return stats;
 }
 
-// =============== recording ===============
-function recordFrames(algo){
+// =============== raw frame recording ===============
+function recordRawFrames(algo){
   var frames = [];
   var isLSB = algo.kind === 'lsb';
   var isWH = algo.kind === 'wh';
@@ -1878,31 +1878,76 @@ function recordFrames(algo){
   return frames;
 }
 
-function downsampleFrames(frames, target){
-  if(frames.length <= target) return frames;
-  var out = [];
-  var step = frames.length / target;
-  var i = 0;
-  while(i < frames.length){
-    var end = Math.min(Math.round((out.length + 1) * step), frames.length);
-    if(end <= i) end = i + 1;
-    var lastF = frames[end - 1];
-    var merged = {
-      tMs: lastF.tMs,
-      addVisited: [], addFrontier: [], remFrontier: [], addDead: [],
-      path: lastF.path, parked: lastF.parked, stats: lastF.stats
-    };
-    for(var j = i; j < end; j++){
-      var f = frames[j];
-      for(var m = 0; m < f.addVisited.length; m++) merged.addVisited.push(f.addVisited[m]);
-      for(var m = 0; m < f.addFrontier.length; m++) merged.addFrontier.push(f.addFrontier[m]);
-      for(var m = 0; m < f.remFrontier.length; m++) merged.remFrontier.push(f.remFrontier[m]);
-      for(var m = 0; m < f.addDead.length; m++) merged.addDead.push(f.addDead[m]);
+// =============== paired frame recording (shared time axis) ===============
+// Both sides are sampled at the SAME algorithm time t_i = i * totalMs / (N-1).
+// Frame i of the left panel and frame i of the right panel both represent the
+// state of their algorithm at time t_i. This is the "same time for each frame"
+// requirement — no matter how fast or slow each side is.
+function recordPairedFrames(rawA, rawB, targetN){
+  var tA = rawA.length > 0 ? rawA[rawA.length - 1].tMs : 0;
+  var tB = rawB.length > 0 ? rawB[rawB.length - 1].tMs : 0;
+  var totalMs = Math.max(tA, tB, 0.001);
+  var N = targetN;
+  if(N < 2) N = 2;
+
+  function buildFor(raw){
+    var out = [];
+    var idx = -1;
+    var curVisited = new Set();
+    var curFrontier = new Set();
+    var curDead = new Set();
+    var lastPath = null, lastParked = null, lastStats = null;
+    for(var i = 0; i < N; i++){
+      var t = (N === 1) ? 0 : (i * totalMs / (N - 1));
+      var pendingAddV = new Set();
+      var pendingAddF = new Set();
+      var pendingRemF = new Set();
+      var pendingAddD = new Set();
+      while(idx + 1 < raw.length && raw[idx + 1].tMs <= t){
+        idx++;
+        var f = raw[idx];
+        for(var j = 0; j < f.addVisited.length; j++){
+          var k = f.addVisited[j];
+          if(!curVisited.has(k)){ curVisited.add(k); pendingAddV.add(k); }
+        }
+        for(var j = 0; j < f.addFrontier.length; j++){
+          var k = f.addFrontier[j];
+          if(!curFrontier.has(k)){ curFrontier.add(k); pendingAddF.add(k); pendingRemF.delete(k); }
+        }
+        for(var j = 0; j < f.remFrontier.length; j++){
+          var k = f.remFrontier[j];
+          if(curFrontier.has(k)){ curFrontier.delete(k); pendingRemF.add(k); pendingAddF.delete(k); }
+        }
+        for(var j = 0; j < f.addDead.length; j++){
+          var k = f.addDead[j];
+          if(!curDead.has(k)){ curDead.add(k); pendingAddD.add(k); }
+        }
+        if(f.path) lastPath = f.path.slice();
+        if(f.parked) lastParked = f.parked.slice();
+        if(f.stats) lastStats = f.stats;
+      }
+      out.push({
+        tMs: t,
+        addVisited: Array.from(pendingAddV),
+        addFrontier: Array.from(pendingAddF),
+        remFrontier: Array.from(pendingRemF),
+        addDead: Array.from(pendingAddD),
+        path: lastPath,
+        parked: lastParked,
+        stats: lastStats
+      });
     }
-    out.push(merged);
-    i = end;
+    return out;
   }
-  return out;
+
+  return {
+    framesA: buildFor(rawA),
+    framesL: buildFor(rawB),
+    totalMs: totalMs,
+    N: N,
+    finishA: tA,
+    finishL: tB
+  };
 }
 
 // =============== playback state ===============
@@ -1910,7 +1955,7 @@ var recording = null, paused = false, finished = false;
 var lastFrameTime = 0, _lastLoopNow = 0;
 var playbackA = { visited:{}, frontier:{}, dead:{} }, playbackL = { visited:{}, frontier:{}, dead:{} };
 var currentA = { path:null, parked:null, stats:null }, currentL = { path:null, parked:null, stats:null };
-var pb = { idxA: -1, idxL: -1, elapsedWall: 0, finishedA: false, finishedL: false };
+var pb = { idx: -1, elapsedWall: 0 };
 var fadeBuf = { A: [], L: [] };
 
 function applyFrame(state, frame){
@@ -1926,40 +1971,35 @@ function ageFadeBuffer(side){
     if(buf[i].age >= FADE_TICKS) buf.splice(i, 1);
   }
 }
-function advanceToIndex(targetA, targetL){
+function advanceToFrame(targetIdx){
   var fa = recording.framesA, fl = recording.framesL;
   var advanced = false;
-  while(pb.idxA < targetA && pb.idxA + 1 < fa.length){
-    pb.idxA++;
-    var f = fa[pb.idxA];
-    applyFrame(playbackA, f);
-    if(f.addVisited.length > 0) fadeBuf.A.push({ cells: f.addVisited, age: 0 });
-    currentA.path = f.path; currentA.parked = f.parked; currentA.stats = f.stats;
+  while(pb.idx < targetIdx && pb.idx + 1 < fa.length && pb.idx + 1 < fl.length){
+    pb.idx++;
+    var fA = fa[pb.idx];
+    applyFrame(playbackA, fA);
+    if(fA.addVisited.length > 0) fadeBuf.A.push({ cells: fA.addVisited, age: 0 });
+    currentA.path = fA.path; currentA.parked = fA.parked; currentA.stats = fA.stats;
+
+    var fL = fl[pb.idx];
+    applyFrame(playbackL, fL);
+    if(fL.addVisited.length > 0) fadeBuf.L.push({ cells: fL.addVisited, age: 0 });
+    currentL.path = fL.path; currentL.parked = fL.parked; currentL.stats = fL.stats;
     advanced = true;
   }
-  while(pb.idxL < targetL && pb.idxL + 1 < fl.length){
-    pb.idxL++;
-    var f2 = fl[pb.idxL];
-    applyFrame(playbackL, f2);
-    if(f2.addVisited.length > 0) fadeBuf.L.push({ cells: f2.addVisited, age: 0 });
-    currentL.path = f2.path; currentL.parked = f2.parked; currentL.stats = f2.stats;
-    advanced = true;
-  }
-  pb.finishedA = (pb.idxA >= fa.length - 1);
-  pb.finishedL = (pb.idxL >= fl.length - 1);
   if(advanced){
     ageFadeBuffer('A');
     ageFadeBuffer('L');
   }
 }
 function resetPlayback(){
-  pb = { idxA: -1, idxL: -1, elapsedWall: 0, finishedA: false, finishedL: false };
+  pb = { idx: -1, elapsedWall: 0 };
   playbackA = { visited:{}, frontier:{}, dead:{} };
   playbackL = { visited:{}, frontier:{}, dead:{} };
   currentA = { path:null, parked:null, stats:null };
   currentL = { path:null, parked:null, stats:null };
   fadeBuf = { A: [], L: [] };
-  advanceToIndex(0, 0);
+  advanceToFrame(0);
 }
 
 // =============== rendering ===============
@@ -2079,37 +2119,44 @@ function renderCurrent(){
 
   var statsA = currentA.stats || recording.framesA[0].stats;
   var statsL = currentL.stats || recording.framesL[0].stats;
-  var badgeA = pb.finishedA
+
+  var tNow = recording.framesA.length > 0
+    ? recording.framesA[Math.max(0, pb.idx)].tMs
+    : 0;
+  var doneA = (tNow >= recording.finishA - 1e-9) && recording.finishA > 0;
+  var doneL = (tNow >= recording.finishL - 1e-9) && recording.finishL > 0;
+
+  var badgeA = doneA
     ? '<div style="color:#6f6;font-weight:bold;margin-top:4px">&#10004; FINISHED @ ' + fmtTime(recording.finishA) + '</div>'
     : '';
-  var badgeL = pb.finishedL
+  var badgeL = doneL
     ? '<div style="color:#6f6;font-weight:bold;margin-top:4px">&#10004; FINISHED @ ' + fmtTime(recording.finishL) + '</div>'
     : '';
   document.getElementById('sA').innerHTML = fmtStats(statsA) + badgeA;
   document.getElementById('sL').innerHTML = fmtStats(statsL) + badgeL;
 
   var speedTxt = (PLAYBACK_SPEED >= 9999) ? 'Instant' : (PLAYBACK_SPEED + 'x');
+  var N = recording.framesA.length;
+  var dtMs = N > 1 ? recording.totalMs / (N - 1) : 0;
   var progPct = Math.min(pb.elapsedWall / PLAYBACK_TARGET_MS * 100, 100).toFixed(0);
 
   var ratioTxt = '';
-  if(recording.finishA > 0.000001 && recording.finishL > 0.000001){
+  if(recording.finishA > 1e-6 && recording.finishL > 1e-6){
     var ratio = recording.finishL / recording.finishA;
     if(ratio > 1.02){
-      ratioTxt = '  |  ' + RIGHT_ALGO + ' ' + ratio.toFixed(1) + '\u00D7 slower (' +
-                 fmtTime(recording.finishL) + ' vs ' + fmtTime(recording.finishA) + ')';
+      ratioTxt = '  |  ' + RIGHT_ALGO + ' ' + ratio.toFixed(1) + '\u00D7 slower';
     } else if(ratio < 0.98){
-      ratioTxt = '  |  ' + LEFT_ALGO + ' ' + (1/ratio).toFixed(1) + '\u00D7 slower (' +
-                 fmtTime(recording.finishA) + ' vs ' + fmtTime(recording.finishL) + ')';
+      ratioTxt = '  |  ' + LEFT_ALGO + ' ' + (1/ratio).toFixed(1) + '\u00D7 slower';
     } else {
-      ratioTxt = '  |  finish times equal (' + fmtTime(recording.finishA) + ')';
+      ratioTxt = '  |  finish times equal';
     }
   }
 
   var meta =
-    'playback ' + progPct + '%' +
-    '  |  ' + LEFT_ALGO + ' ' + Math.max(0, pb.idxA) + '/' + (recording.framesA.length - 1) +
-    '   ' + RIGHT_ALGO + ' ' + Math.max(0, pb.idxL) + '/' + (recording.framesL.length - 1) +
-    '  |  speed ' + speedTxt + ratioTxt;
+    't = ' + fmtTime(tNow) + ' / ' + fmtTime(recording.totalMs) +
+    '  |  frame ' + Math.max(0, pb.idx) + '/' + (N - 1) +
+    '  |  \u0394t = ' + fmtTime(dtMs) + ' per frame' +
+    '  |  speed ' + speedTxt + ' (' + progPct + '%)' + ratioTxt;
   document.getElementById('metaA').innerHTML = meta;
   document.getElementById('metaL').innerHTML = meta;
 }
@@ -2169,27 +2216,26 @@ function buildAndPlay(){
     var t0 = performance.now();
     var lAlgo = makeAlgo(LEFT_ALGO, grid, START, GOAL);
     var rAlgo = makeAlgo(RIGHT_ALGO, grid, START, GOAL);
-    var framesL = recordFrames(lAlgo);
-    var framesR = recordFrames(rAlgo);
-    framesL = downsampleFrames(framesL, TARGET_PLAYBACK_FRAMES);
-    framesR = downsampleFrames(framesR, TARGET_PLAYBACK_FRAMES);
+    var rawL = recordRawFrames(lAlgo);
+    var rawR = recordRawFrames(rAlgo);
+    var paired = recordPairedFrames(rawL, rawR, TARGET_PLAYBACK_FRAMES);
     var computeMs = performance.now() - t0;
     recording = {
-      framesA: framesL, framesL: framesR,
+      framesA: paired.framesA,
+      framesL: paired.framesL,
       grid: grid, START: START, GOAL: GOAL, W: W, H: H,
-      computeMs: computeMs
+      computeMs: computeMs,
+      totalMs: paired.totalMs,
+      finishA: paired.finishA,
+      finishL: paired.finishL
     };
     if(lAlgo.kind === 'tscs') recording.tscsTileInfoL = { tilesX: lAlgo.tilesX, tilesY: lAlgo.tilesY, TS: lAlgo.TS };
     if(rAlgo.kind === 'tscs') recording.tscsTileInfoR = { tilesX: rAlgo.tilesX, tilesY: rAlgo.tilesY, TS: rAlgo.TS };
 
-    var finishA = framesL.length > 0 ? Math.max(framesL[framesL.length - 1].tMs, 0.00001) : 0.00001;
-    var finishL = framesR.length > 0 ? Math.max(framesR[framesR.length - 1].tMs, 0.00001) : 0.00001;
-    recording.finishA = finishA;
-    recording.finishL = finishL;
-    recording.totalMs = Math.max(finishA, finishL);
-
-    banner.textContent = 'Recorded ' + framesL.length + '/' + framesR.length + ' frames in ' + fmtTime(computeMs) +
-                         '  (finish: ' + LEFT_ALGO + ' ' + fmtTime(finishA) + ', ' + RIGHT_ALGO + ' ' + fmtTime(finishL) + ')';
+    banner.textContent = 'Recorded ' + paired.N + ' paired frames in ' + fmtTime(computeMs) +
+                         '  (raw ' + rawL.length + '/' + rawR.length +
+                         ', finish ' + LEFT_ALGO + ' ' + fmtTime(paired.finishA) +
+                         ', ' + RIGHT_ALGO + ' ' + fmtTime(paired.finishL) + ')';
     setTimeout(function(){ banner.style.display = 'none'; }, 3000);
 
     resetPlayback();
@@ -2217,8 +2263,10 @@ function loop(now){
   _lastLoopNow = now;
   lastFrameTime = now;
 
+  var N = recording.framesA.length;
+
   if(PLAYBACK_SPEED >= 9999){
-    advanceToIndex(recording.framesA.length - 1, recording.framesL.length - 1);
+    advanceToFrame(N - 1);
     pb.elapsedWall = PLAYBACK_TARGET_MS;
     finished = true;
     renderCurrent();
@@ -2229,7 +2277,7 @@ function loop(now){
   pb.elapsedWall += deltaWall * PLAYBACK_SPEED;
 
   if(pb.elapsedWall >= PLAYBACK_TARGET_MS){
-    advanceToIndex(recording.framesA.length - 1, recording.framesL.length - 1);
+    advanceToFrame(N - 1);
     finished = true;
     renderCurrent();
     document.getElementById('pauseBtn').innerText = 'Done';
@@ -2237,9 +2285,8 @@ function loop(now){
   }
 
   var progress = pb.elapsedWall / PLAYBACK_TARGET_MS;
-  var targetA = Math.min(Math.floor(progress * recording.framesA.length), recording.framesA.length - 1);
-  var targetL = Math.min(Math.floor(progress * recording.framesL.length), recording.framesL.length - 1);
-  advanceToIndex(targetA, targetL);
+  var targetIdx = Math.min(Math.floor(progress * N), N - 1);
+  advanceToFrame(targetIdx);
   renderCurrent();
 }
 
@@ -2693,7 +2740,7 @@ function formatMassAll(types, algos, sizes, acc, overall, sizeAcc, perType, tota
   L.push('  combined = 0.5*relTime + 0.5*relMem, in (0,1]');
   L.push('  Wins    = share of top combined (ties split)');
   L.push('  score   = sum(combined) / n     (failures contribute 0)');
-  L.push('  rkPts   = sum of rank pts / n   (N-1 for 1st, N-2 for 2nd, ...)');
+  L.push('  rkPts   = sum of rank pts / n');
   L.push('  Time includes constructor. Memory is a coarse estimate.');
   L.push('');
 
